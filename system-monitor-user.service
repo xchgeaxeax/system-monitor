@@ -1,0 +1,17 @@
+[Unit]
+Description=System Performance Monitor
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/system-monitor/server.py
+WorkingDirectory=/opt/system-monitor
+Restart=on-failure
+RestartSec=5
+MemoryMax=128M
+LimitNOFILE=1024
+Environment=AI_MONITOR_PORT=9527
+Environment=AI_MONITOR_HOST=0.0.0.0
+
+[Install]
+WantedBy=default.target

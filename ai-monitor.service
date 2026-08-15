@@ -1,0 +1,17 @@
+[Unit]
+Description=AI Server Performance Monitor
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/xchgeaxeax/.hermes/workspace/monitor/server.py
+WorkingDirectory=/home/xchgeaxeax/.hermes/workspace/monitor
+Restart=on-failure
+RestartSec=5
+# Only memory limit, no CPU throttle (API is on-demand)
+MemoryMax=128M
+LimitNOFILE=1024
+Environment=AI_MONITOR_PORT=9528
+
+[Install]
+WantedBy=default.target

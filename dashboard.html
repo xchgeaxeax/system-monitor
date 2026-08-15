@@ -1,0 +1,1252 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>System Monitor</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#0a0e14;--surface:#0f141e;--card:#111827;--card2:#1a2332;--border:#1e293b;
+  --text:#e2e8f0;--dim:#94a3b8;--muted:#64748b;
+  --accent:#3b82f6;--accent-soft:rgba(59,130,246,.12);
+  --green:#22c55e;--orange:#f59e0b;--red:#ef4444;--purple:#a855f7;--cyan:#06b6d4;
+  --graph-bg:#0d1420;--shadow:none;
+}
+:root[data-theme="light"]{
+  --bg:#f2f5f9;--surface:#ffffff;--card:#ffffff;--card2:#e9edf3;--border:#d9e0ea;
+  --text:#1a2332;--dim:#46536a;--muted:#8b96a8;
+  --accent:#2563eb;--accent-soft:rgba(37,99,235,.08);
+  --green:#16a34a;--orange:#d97706;--red:#dc2626;--purple:#7c3aed;--cyan:#0891b2;
+  --graph-bg:#eef2f7;--shadow:0 1px 3px rgba(16,24,40,.06);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{font-size:15px}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.45;overflow-x:hidden}
+a{color:var(--accent);text-decoration:none}
+button{font:inherit;cursor:pointer}
+input,select{font:inherit;color:var(--text);background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:6px 10px;outline:none}
+input:focus,select:focus{border-color:var(--accent)}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:5px}
+::-webkit-scrollbar-track{background:transparent}
+
+/* ── Auth screens ── */
+.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+.auth-card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:36px 32px;width:100%;max-width:380px;box-shadow:var(--shadow)}
+.auth-card .logo{font-size:26px;font-weight:700;text-align:center;margin-bottom:4px}
+.auth-card .sub{text-align:center;color:var(--muted);font-size:13px;margin-bottom:24px}
+.auth-card label{display:block;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin:14px 0 5px}
+.auth-card input{width:100%;padding:10px 12px;font-size:15px}
+.auth-card .btn{width:100%;margin-top:22px;padding:11px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-weight:600;font-size:15px}
+.auth-card .btn:disabled{opacity:.6;cursor:wait}
+.auth-err{color:var(--red);font-size:13px;margin-top:12px;min-height:18px;text-align:center}
+.auth-hint{color:var(--muted);font-size:12px;margin-top:16px;text-align:center;line-height:1.5}
+
+/* ── Topbar ── */
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:9px 16px;background:var(--surface);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100;gap:10px}
+.topbar .left{display:flex;align-items:center;gap:10px;min-width:0}
+.status-dot{width:9px;height:9px;border-radius:50%;background:var(--green);flex-shrink:0;animation:pulse 2s infinite}
+.status-dot.warn{background:var(--orange)}
+.status-dot.err{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.logo{font-size:17px;font-weight:700;white-space:nowrap}
+.version{font-size:11px;color:var(--muted);background:var(--card2);padding:2px 7px;border-radius:4px}
+.topbar .right{display:flex;align-items:center;gap:14px;font-size:13px;color:var(--muted);flex-shrink:0}
+.topbar .right b{color:var(--dim);font-weight:600;font-variant-numeric:tabular-nums}
+.icon-btn{background:transparent;border:1px solid var(--border);border-radius:7px;color:var(--dim);padding:5px 9px;font-size:13px;white-space:nowrap}
+.icon-btn:hover{border-color:var(--accent);color:var(--text)}
+.alert-badge{position:relative;display:inline-block}
+.alert-badge .count{position:absolute;top:-7px;right:-9px;background:var(--red);color:#fff;font-size:10px;font-weight:700;border-radius:8px;padding:0 5px;min-width:16px;text-align:center;line-height:15px}
+.refresh-status{display:flex;align-items:center;gap:5px;font-size:12px}
+.refresh-status .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
+.refresh-status.paused .dot{background:var(--orange);animation:none}
+.error-banner{background:rgba(239,68,68,.1);border-bottom:1px solid rgba(239,68,68,.4);color:var(--red);padding:6px 16px;font-size:13px;display:none}
+
+/* ── Tabs ── */
+.tabs{display:flex;gap:2px;padding:0 12px;background:var(--card);border-bottom:1px solid var(--border);overflow-x:auto;position:sticky;top:47px;z-index:99}
+.tab{padding:9px 14px;font-size:14px;cursor:pointer;border:none;background:transparent;color:var(--muted);border-bottom:2px solid transparent;font-weight:500;white-space:nowrap;transition:color .15s}
+.tab:hover{color:var(--dim)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab .badge-n{font-size:10px;background:var(--red);color:#fff;border-radius:8px;padding:0 5px;margin-left:4px}
+
+/* ── Content ── */
+.content{padding:14px 16px;max-width:1500px;margin:0 auto}
+.panel{display:none}
+.panel.active{display:block}
+
+/* ── Summary grid ── */
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px;margin-bottom:12px}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 14px;box-shadow:var(--shadow)}
+.stat h3{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-bottom:4px;font-weight:600}
+.stat .value{font-size:28px;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums}
+.stat .sub{font-size:12px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat.click{cursor:pointer}
+.stat.click:hover{border-color:var(--accent)}
+
+/* ── Cards ── */
+.card{background:var(--card);border:1px solid var(--border);border-radius:10px;margin-bottom:12px;overflow:hidden;box-shadow:var(--shadow)}
+.card-header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;cursor:pointer;user-select:none;gap:8px}
+.card-header:hover{background:var(--accent-soft)}
+.card-header h2{font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+.card-header .badge{font-size:11px;padding:2px 8px;border-radius:4px;background:var(--card2);color:var(--muted);font-weight:500}
+.card-header .toggle{color:var(--muted);font-size:11px;transition:transform .15s}
+.card-header .toggle.open{transform:rotate(90deg)}
+.card-body{padding:12px 14px;display:none}
+.card-body.open{display:block}
+.card-actions{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+
+/* ── Bars / rows ── */
+.bar{height:6px;background:var(--card2);border-radius:3px;overflow:hidden;margin:4px 0}
+.bar .fill{height:100%;border-radius:3px;transition:width .4s ease;background:var(--accent)}
+.bar .fill.ok{background:var(--green)}
+.bar .fill.warn{background:var(--orange)}
+.bar .fill.crit{background:var(--red)}
+.row{display:flex;justify-content:space-between;gap:10px;font-size:14px;padding:3px 0}
+.row .label{color:var(--muted);flex-shrink:0}
+.row .value{font-weight:500;text-align:right;font-variant-numeric:tabular-nums;word-break:break-all}
+
+/* ── Tables ── */
+.table-wrap{overflow-x:auto;max-height:420px;overflow-y:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{padding:7px 9px;text-align:left;color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--card);letter-spacing:.4px;white-space:nowrap}
+th.sortable{cursor:pointer}
+th.sortable:hover{color:var(--text)}
+th .arrow{font-size:9px}
+td{padding:5px 9px;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums;white-space:nowrap}
+td.wrap{white-space:normal;max-width:420px;overflow:hidden;text-overflow:ellipsis}
+tr:hover td{background:var(--accent-soft)}
+td.num,th.num{text-align:right}
+.pill{display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:9px}
+.pill.ok{background:rgba(34,197,94,.15);color:var(--green)}
+.pill.warn{background:rgba(245,158,11,.15);color:var(--orange)}
+.pill.crit{background:rgba(239,68,68,.15);color:var(--red)}
+.pill.muted{background:var(--card2);color:var(--muted)}
+
+/* ── Core grid ── */
+.core-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(72px,1fr));gap:5px}
+.core{background:var(--card2);border-radius:6px;padding:6px 8px;border:1px solid transparent}
+.core .label{font-size:10px;color:var(--muted);margin-bottom:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.core .value{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums}
+.core .bar{height:3px;margin-top:3px}
+.core.hot{border-color:rgba(239,68,68,.5)}
+.core.warm{border-color:rgba(245,158,11,.4)}
+
+/* ── Graphs ── */
+.graph-wrap{position:relative}
+.graph{width:100%;height:120px;border-radius:7px;background:var(--graph-bg);display:block;cursor:crosshair}
+.graph.small{height:80px}
+.graph-legend{display:flex;gap:14px;font-size:11px;color:var(--muted);margin-top:5px;flex-wrap:wrap}
+.graph-legend .lg{display:flex;align-items:center;gap:5px}
+.graph-legend .sw{width:10px;height:3px;border-radius:2px}
+.graph-time{font-size:10px;color:var(--muted);display:flex;justify-content:space-between;margin-top:2px}
+.tooltip{position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:7px 10px;font-size:12px;pointer-events:none;z-index:999;display:none;box-shadow:0 4px 14px rgba(0,0,0,.25);font-variant-numeric:tabular-nums}
+.tooltip .tt-time{color:var(--muted);font-size:11px;margin-bottom:3px}
+.tooltip .tt-row{display:flex;align-items:center;gap:6px}
+.tooltip .tt-row .sw{width:8px;height:3px;border-radius:2px}
+
+/* ── GPU cards ── */
+.gpu-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}
+.gpu-card{border-color:var(--accent)}
+.gpu-card .card-header h2{color:var(--accent)}
+.gpu-engines{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:6px;margin-top:8px}
+.gpu-engine{background:var(--card2);border-radius:6px;padding:7px 9px}
+.gpu-engine .label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+.gpu-engine .value{font-size:16px;font-weight:700;font-variant-numeric:tabular-nums}
+
+/* ── Alerts ── */
+.alert-item{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border-radius:8px;margin-bottom:8px;border:1px solid}
+.alert-item.danger{background:rgba(239,68,68,.08);border-color:rgba(239,68,68,.35)}
+.alert-item.warning{background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.35)}
+.alert-item .icon{font-size:16px;line-height:1.3}
+.alert-item .body{flex:1;min-width:0}
+.alert-item .msg{font-size:14px;font-weight:500}
+.alert-item .meta{font-size:11px;color:var(--muted);margin-top:2px}
+.alert-item .actions{display:flex;gap:5px;flex-shrink:0}
+.alert-item.acked{opacity:.65}
+.mini-btn{background:var(--card2);border:1px solid var(--border);border-radius:6px;color:var(--dim);padding:4px 10px;font-size:12px;white-space:nowrap}
+.mini-btn:hover{border-color:var(--accent);color:var(--text)}
+.mini-btn.danger:hover{border-color:var(--red);color:var(--red)}
+.empty{color:var(--muted);font-size:13px;text-align:center;padding:22px 10px}
+.empty .big{font-size:26px;margin-bottom:6px}
+
+/* ── Logs ── */
+.log-area{background:var(--graph-bg);border:1px solid var(--border);border-radius:7px;padding:10px 12px;font-family:ui-monospace,'SF Mono',Menlo,monospace;font-size:12px;line-height:1.65;max-height:440px;overflow:auto;color:var(--dim);white-space:pre-wrap;word-break:break-all}
+
+/* ── Settings ── */
+.set-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.set-form label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+.set-form input{width:100%}
+.set-msg{font-size:12px;margin-top:8px;min-height:16px}
+.set-msg.ok{color:var(--green)}
+.set-msg.err{color:var(--red)}
+.key-row{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px}
+.key-row:last-child{border-bottom:none}
+.key-row .name{font-weight:600;min-width:90px}
+.key-row .meta{color:var(--muted);font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+
+/* ── Responsive ── */
+@media(max-width:820px){
+  .summary-grid{grid-template-columns:repeat(2,1fr)}
+  .topbar .right span.hide-m{display:none}
+  .tabs{top:46px}
+}
+</style>
+</head>
+<body>
+
+<!-- ══ Auth screens ══ -->
+<div id="auth-setup" class="auth-wrap" style="display:none">
+  <div class="auth-card">
+    <div class="logo">📈 System Monitor</div>
+    <div class="sub">First run — create the admin account</div>
+    <form id="setup-form">
+      <label>Username</label>
+      <input id="setup-user" autocomplete="username" required>
+      <label>Password (min 8 chars)</label>
+      <input id="setup-pass" type="password" autocomplete="new-password" required>
+      <label>Confirm password</label>
+      <input id="setup-pass2" type="password" autocomplete="new-password" required>
+      <button class="btn" type="submit">Create account &amp; enter</button>
+      <div class="auth-err" id="setup-err"></div>
+    </form>
+  </div>
+</div>
+
+<div id="auth-login" class="auth-wrap" style="display:none">
+  <div class="auth-card">
+    <div class="logo">📈 System Monitor</div>
+    <div class="sub">Sign in to continue</div>
+    <form id="login-form">
+      <label>Username</label>
+      <input id="login-user" autocomplete="username" required>
+      <label>Password</label>
+      <input id="login-pass" type="password" autocomplete="current-password" required>
+      <button class="btn" type="submit">Sign in</button>
+      <div class="auth-err" id="login-err"></div>
+    </form>
+  </div>
+</div>
+
+<!-- ══ Main app ══ -->
+<div id="app" style="display:none">
+<div class="topbar">
+  <div class="left">
+    <div class="status-dot" id="status-dot"></div>
+    <span class="logo">System Monitor</span>
+    <span class="version" id="version-badge">-</span>
+  </div>
+  <div class="right">
+    <span class="hide-m">Uptime <b id="uptime-text">-</b></span>
+    <span class="hide-m">Load <b id="load-text">-</b></span>
+    <span class="alert-badge" id="alert-badge-wrap" style="cursor:pointer" title="Alerts">
+      <button class="icon-btn" id="alert-bell">🔔</button>
+      <span class="count" id="alert-count" style="display:none">0</span>
+    </span>
+    <button class="icon-btn" id="theme-btn" title="Toggle theme (auto → dark → light)">🌗</button>
+    <button class="icon-btn" id="settings-btn" title="Settings">⚙️</button>
+    <span class="refresh-status" id="refresh-status"><span class="dot"></span><span id="refresh-text">Live</span></span>
+  </div>
+</div>
+<div class="error-banner" id="error-banner"></div>
+
+<div class="tabs" id="tabs">
+  <div class="tab active" data-tab="overview">Overview</div>
+  <div class="tab" data-tab="alerts">Alerts<span class="badge-n" id="tab-alert-badge" style="display:none">0</span></div>
+  <div class="tab" data-tab="cpu">CPU</div>
+  <div class="tab" data-tab="gpu">GPU</div>
+  <div class="tab" data-tab="memory">Memory</div>
+  <div class="tab" data-tab="storage">Storage</div>
+  <div class="tab" data-tab="network">Network</div>
+  <div class="tab" data-tab="temps">Temperatures</div>
+  <div class="tab" data-tab="processes">Processes</div>
+  <div class="tab" data-tab="logs">System Logs</div>
+</div>
+
+<div class="content">
+
+<!-- Overview -->
+<div class="panel active" id="panel-overview">
+  <div id="ov-alerts"></div>
+  <div class="summary-grid">
+    <div class="stat click" data-goto="cpu"><h3>CPU</h3><div class="value" id="ov-cpu-pct">-</div><div class="sub" id="ov-cpu-sub">-</div></div>
+    <div class="stat click" data-goto="memory"><h3>Memory</h3><div class="value" id="ov-mem-pct">-</div><div class="sub" id="ov-mem-sub">-</div></div>
+    <div class="stat click" data-goto="gpu"><h3>GPU</h3><div class="value" id="ov-gpu-val">-</div><div class="sub" id="ov-gpu-sub">-</div></div>
+    <div class="stat click" data-goto="network"><h3>Network</h3><div class="value" id="ov-net-rx">-</div><div class="sub" id="ov-net-tx">-</div></div>
+    <div class="stat click" data-goto="storage"><h3>Disks</h3><div class="value" id="ov-disk-pct">-</div><div class="sub" id="ov-disk-sub">-</div></div>
+    <div class="stat"><h3>System</h3><div class="value" id="ov-uptime">-</div><div class="sub" id="ov-load">-</div></div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>Network Activity</h2><span class="badge" id="net-badge">-</span></div>
+    <div class="card-body open">
+      <div class="graph-wrap"><canvas id="net-graph" class="graph"></canvas></div>
+      <div class="graph-legend"><span class="lg"><span class="sw" style="background:var(--cyan)"></span>Download</span><span class="lg"><span class="sw" style="background:var(--purple)"></span>Upload</span></div>
+      <div class="graph-time"><span data-tl>-</span><span data-tr>-</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- Alerts -->
+<div class="panel" id="panel-alerts">
+  <div class="card">
+    <div class="card-header"><h2>Active Alerts</h2><span class="badge" id="alert-active-badge">0</span></div>
+    <div class="card-body open"><div id="alert-active-list"></div></div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>Resolved History</h2>
+      <div class="card-actions"><button class="mini-btn" id="clear-resolved-btn">Clear all</button><span class="badge" id="alert-hist-badge">0</span></div>
+    </div>
+    <div class="card-body open"><div id="alert-hist-list"></div></div>
+  </div>
+</div>
+
+<!-- CPU -->
+<div class="panel" id="panel-cpu">
+  <div class="card">
+    <div class="card-header"><h2>CPU Information</h2><span class="badge" id="cpu-badge">-</span></div>
+    <div class="card-body open">
+      <div class="row"><span class="label">Model</span><span class="value" id="cpu-model">-</span></div>
+      <div class="row"><span class="label">Cores / Threads</span><span class="value" id="cpu-cores">-</span></div>
+      <div class="row"><span class="label">Frequency</span><span class="value" id="cpu-freq">-</span></div>
+      <div class="row"><span class="label">Load Average</span><span class="value" id="cpu-load">-</span></div>
+      <div class="row"><span class="label">Package Power</span><span class="value" id="cpu-power">-</span></div>
+      <div id="cpu-cache-info"></div>
+      <div class="bar" style="margin-top:10px"><div class="fill" id="cpu-bar" style="width:0%"></div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>CPU Frequency</h2></div>
+    <div class="card-body open">
+      <div class="graph-wrap"><canvas id="cpu-freq-graph" class="graph small"></canvas></div>
+      <div class="graph-time"><span>-</span><span>-</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>Per-Core Usage</h2><span class="badge" id="cpu-cores-badge">-</span></div>
+    <div class="card-body open"><div class="core-grid" id="cpu-cores-grid"></div></div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>Core Temperatures</h2><span class="badge" id="cpu-temps-badge">-</span></div>
+    <div class="card-body open"><div class="core-grid" id="cpu-temps-grid"></div></div>
+  </div>
+</div>
+
+<!-- GPU -->
+<div class="panel" id="panel-gpu"><div class="gpu-grid" id="gpu-cards"></div></div>
+
+<!-- Memory -->
+<div class="panel" id="panel-memory">
+  <div class="card">
+    <div class="card-header"><h2>Memory Usage</h2><span class="badge" id="mem-badge">-</span></div>
+    <div class="card-body open">
+      <div class="row"><span class="label">Total</span><span class="value" id="mem-total">-</span></div>
+      <div class="row"><span class="label">Used</span><span class="value" id="mem-used">-</span></div>
+      <div class="row"><span class="label">Available</span><span class="value" id="mem-available">-</span></div>
+      <div class="row"><span class="label">Cached / Buffers</span><span class="value" id="mem-cached">-</span></div>
+      <div class="bar"><div class="fill" id="mem-bar" style="width:0%"></div></div>
+      <div class="row" style="margin-top:8px"><span class="label">Swap</span><span class="value" id="mem-swap">-</span></div>
+      <div class="bar"><div class="fill" id="swap-bar" style="width:0%"></div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>Top Processes by Memory</h2><span class="badge" id="mem-procs-badge">-</span></div>
+    <div class="card-body open"><div class="table-wrap"><table><thead><tr><th>PID</th><th>Name</th><th class="num">RSS</th><th class="num">Mem%</th></tr></thead><tbody id="mem-procs-table"></tbody></table></div></div>
+  </div>
+</div>
+
+<!-- Storage -->
+<div class="panel" id="panel-storage">
+  <div class="card">
+    <div class="card-header"><h2>Partitions</h2><span class="badge" id="part-badge">-</span></div>
+    <div class="card-body open"><div id="part-list"></div></div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>Disk I/O</h2></div>
+    <div class="card-body open">
+      <div class="graph-wrap"><canvas id="disk-graph" class="graph small"></canvas></div>
+      <div class="graph-legend" id="disk-legend"></div>
+      <div class="graph-time"><span>-</span><span>-</span></div>
+      <div class="table-wrap" style="margin-top:10px"><table><thead><tr><th>Disk</th><th class="num">Read</th><th class="num">Write</th><th class="num">Read rate</th><th class="num">Write rate</th></tr></thead><tbody id="disk-table"></tbody></table></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>Drive Health (SMART)</h2><span class="badge" id="smart-badge">-</span></div>
+    <div class="card-body open"><div class="table-wrap"><table><thead><tr><th>Device</th><th>Model</th><th>Health</th><th class="num">Temp</th><th class="num">Life</th><th class="num">Read</th><th class="num">Write</th><th class="num">POH</th></tr></thead><tbody id="smart-table"></tbody></table></div></div>
+  </div>
+</div>
+
+<!-- Network -->
+<div class="panel" id="panel-network">
+  <div class="card">
+    <div class="card-header"><h2>Throughput</h2></div>
+    <div class="card-body open">
+      <div class="graph-wrap"><canvas id="net-graph-2" class="graph"></canvas></div>
+      <div class="graph-legend"><span class="lg"><span class="sw" style="background:var(--cyan)"></span>Download</span><span class="lg"><span class="sw" style="background:var(--purple)"></span>Upload</span></div>
+      <div class="graph-time"><span>-</span><span>-</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>Interfaces</h2>
+      <div class="card-actions"><label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="show-virtual" style="width:auto"> show virtual</label></div>
+    </div>
+    <div class="card-body open"><div class="table-wrap"><table><thead><tr><th>Interface</th><th>State</th><th class="num">Speed</th><th class="num">↓ Now</th><th class="num">↑ Now</th><th class="num">↓ Total</th><th class="num">↑ Total</th><th class="num">Err/Drop</th></tr></thead><tbody id="net-table"></tbody></table></div></div>
+  </div>
+</div>
+
+<!-- Temperatures -->
+<div class="panel" id="panel-temps">
+  <div class="card">
+    <div class="card-header"><h2>Sensors</h2><span class="badge" id="temp-badge">-</span></div>
+    <div class="card-body open"><div class="table-wrap"><table><thead><tr><th>Chip</th><th>Sensor</th><th class="num">Temp</th><th class="num">Max</th><th class="num">Crit</th><th>Status</th></tr></thead><tbody id="temp-table"></tbody></table></div></div>
+  </div>
+  <div class="card" id="fan-card" style="display:none">
+    <div class="card-header"><h2>Fans</h2></div>
+    <div class="card-body open"><div class="table-wrap"><table><thead><tr><th>Chip</th><th>Fan</th><th class="num">RPM</th><th class="num">Max</th></tr></thead><tbody id="fan-table"></tbody></table></div></div>
+  </div>
+</div>
+
+<!-- Processes -->
+<div class="panel" id="panel-processes">
+  <div class="card">
+    <div class="card-header"><h2>Processes</h2>
+      <div class="card-actions">
+        <input id="proc-search" placeholder="Search name / user / PID" style="width:200px;font-size:12px">
+        <span class="badge" id="proc-badge">-</span>
+      </div>
+    </div>
+    <div class="card-body open"><div class="table-wrap"><table><thead><tr>
+      <th>PID</th><th>Name</th><th>User</th>
+      <th class="num sortable" data-sort="cpu">CPU <span class="arrow" id="arr-cpu">▼</span></th>
+      <th class="num sortable" data-sort="mem">MEM <span class="arrow" id="arr-mem"></span></th>
+      <th class="num sortable" data-sort="rss_mb">RSS <span class="arrow" id="arr-rss_mb"></span></th>
+      <th>Status</th><th class="num">Uptime</th>
+    </tr></thead><tbody id="proc-table"></tbody></table></div></div>
+  </div>
+</div>
+
+<!-- Logs -->
+<div class="panel" id="panel-logs">
+  <div class="card">
+    <div class="card-header"><h2>System Logs</h2>
+      <div class="card-actions">
+        <select id="log-level" style="font-size:12px"><option value="all">All levels</option><option value="err">Error</option><option value="warning">Warning</option><option value="notice">Notice+</option></select>
+        <select id="log-unit" style="font-size:12px;max-width:170px"><option value="">All units</option></select>
+        <input id="log-search" placeholder="Grep…" style="width:130px;font-size:12px">
+        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="log-noisy" style="width:auto"> noisy</label>
+        <button class="mini-btn" id="log-refresh">↻</button>
+      </div>
+    </div>
+    <div class="card-body open"><div class="log-area" id="log-area">Loading…</div></div>
+  </div>
+</div>
+
+<!-- Settings -->
+<div class="panel" id="panel-settings">
+  <div class="set-grid">
+    <div class="card">
+      <div class="card-header"><h2>Account</h2></div>
+      <div class="card-body open set-form">
+        <div class="row"><span class="label">Signed in as</span><span class="value" id="set-user">-</span></div>
+        <label>Current password</label><input id="pw-old" type="password">
+        <label>New password (min 8 chars)</label><input id="pw-new" type="password">
+        <label>Confirm new password</label><input id="pw-new2" type="password">
+        <div class="card-actions" style="margin-top:12px">
+          <button class="mini-btn" id="pw-change-btn">Change password</button>
+          <button class="mini-btn danger" id="logout-btn">Log out</button>
+        </div>
+        <div class="set-msg" id="pw-msg"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h2>API Keys</h2></div>
+      <div class="card-body open">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Keys work with <code>Authorization: Bearer &lt;key&gt;</code> — for scripts, Grafana, Home Assistant etc. Keys can read metrics but cannot manage auth.</div>
+        <div class="card-actions" style="margin-bottom:10px">
+          <input id="key-name" placeholder="key name" style="font-size:12px;width:150px">
+          <button class="mini-btn" id="key-create-btn">Create</button>
+          <div class="set-msg" id="key-msg"></div>
+        </div>
+        <div id="key-list"></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h2>Appearance</h2></div>
+      <div class="card-body open">
+        <div class="row"><span class="label">Theme</span><span class="value" id="theme-label">auto</span></div>
+        <div class="card-actions" style="margin-top:8px">
+          <button class="mini-btn" data-theme-set="auto">Auto (system)</button>
+          <button class="mini-btn" data-theme-set="dark">Dark</button>
+          <button class="mini-btn" data-theme-set="light">Light</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /content -->
+</div><!-- /app -->
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+"use strict";
+// ══════════════════════════════════════════════════════════════════════
+// State
+// ══════════════════════════════════════════════════════════════════════
+const REFRESH_MS = 1500;
+const state = {
+  token: localStorage.getItem('am_token') || '',
+  theme: localStorage.getItem('am_theme') || 'auto',
+  visible: true,
+  tab: 'overview',
+  procSort: 'cpu',
+  procSearch: '',
+  logTimer: null,
+  errCount: 0,
+};
+let refreshTimer = null;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtBytes = mb => mb >= 1024 ? (mb/1024).toFixed(1)+' GB' : mb.toFixed(0)+' MB';
+const fmtUptime = s => { const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
+  return d>0 ? `${d}d ${h}h` : h>0 ? `${h}h ${m}m` : `${m}m`; };
+const fmtTime = ts => new Date(ts*1000).toLocaleTimeString([], {hour12:false});
+
+// ══════════════════════════════════════════════════════════════════════
+// API
+// ══════════════════════════════════════════════════════════════════════
+async function api(path, opts = {}) {
+  const headers = Object.assign({}, opts.headers || {});
+  if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+  let r;
+  try { r = await fetch(path, Object.assign({}, opts, {headers})); }
+  catch (e) { throw new Error('Network error'); }
+  if (r.status === 401) { showAuth(); throw new Error('unauthorized'); }
+  if (!r.ok) {
+    let msg = r.status;
+    try { const j = await r.json(); msg = j.error || msg; } catch(e) {}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+function showError(msg) {
+  state.errCount++;
+  const b = $('error-banner');
+  b.textContent = '⚠ ' + msg + (state.errCount > 3 ? ` (×${state.errCount})` : '');
+  b.style.display = 'block';
+  clearTimeout(showError._t);
+  showError._t = setTimeout(() => { b.style.display = 'none'; state.errCount = 0; }, 6000);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Theme
+// ══════════════════════════════════════════════════════════════════════
+const mq = window.matchMedia('(prefers-color-scheme: light)');
+function applyTheme() {
+  const t = state.theme === 'auto' ? (mq.matches ? 'light' : 'dark') : state.theme;
+  document.documentElement.setAttribute('data-theme', t);
+  const label = $('theme-label'); if (label) label.textContent = state.theme;
+  const btn = $('theme-btn');
+  if (btn) btn.textContent = state.theme === 'light' ? '☀️' : state.theme === 'dark' ? '🌙' : '🌗';
+}
+function cycleTheme() {
+  state.theme = state.theme === 'auto' ? 'dark' : state.theme === 'dark' ? 'light' : 'auto';
+  localStorage.setItem('am_theme', state.theme);
+  applyTheme();
+}
+mq.addEventListener('change', () => { if (state.theme === 'auto') applyTheme(); });
+applyTheme();
+
+// ══════════════════════════════════════════════════════════════════════
+// Auth flow
+// ══════════════════════════════════════════════════════════════════════
+function showAuth() {
+  $('app').style.display = 'none';
+  stopRefresh();
+  $('auth-login').style.display = 'flex';
+  $('auth-setup').style.display = 'none';
+}
+function showSetup() {
+  $('app').style.display = 'none';
+  stopRefresh();
+  $('auth-setup').style.display = 'flex';
+  $('auth-login').style.display = 'none';
+}
+function showApp() {
+  $('auth-setup').style.display = 'none';
+  $('auth-login').style.display = 'none';
+  $('app').style.display = 'block';
+  startRefresh();
+}
+
+async function initAuth() {
+  try {
+    const st = await api('/api/auth/status');
+    if (!st.configured) { showSetup(); return; }
+  } catch (e) { showAuth(); return; }
+  if (!state.token) { showAuth(); return; }
+  // Verify token with an auth-required endpoint (health is public)
+  try {
+    await api('/api/quick-stats');
+    showApp();
+  } catch (e) { showAuth(); }
+}
+
+$('login-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  $('login-err').textContent = '';
+  try {
+    const r = await api('/api/auth/login', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username: $('login-user').value, password: $('login-pass').value})});
+    state.token = r.token;
+    localStorage.setItem('am_token', state.token);
+    showApp();
+  } catch (err) { $('login-err').textContent = err.message; }
+});
+
+$('setup-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  $('setup-err').textContent = '';
+  if ($('setup-pass').value !== $('setup-pass2').value) { $('setup-err').textContent = 'Passwords do not match'; return; }
+  try {
+    const r = await api('/api/auth/setup', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username: $('setup-user').value, password: $('setup-pass').value})});
+    state.token = r.token;
+    localStorage.setItem('am_token', state.token);
+    showApp();
+  } catch (err) { $('setup-err').textContent = err.message; }
+});
+
+$('logout-btn').addEventListener('click', async () => {
+  try { await api('/api/auth/logout', {method:'POST'}); } catch(e) {}
+  state.token = '';
+  localStorage.removeItem('am_token');
+  showAuth();
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// Tabs
+// ══════════════════════════════════════════════════════════════════════
+function switchTab(tab) {
+  state.tab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + tab));
+  fetchData();
+}
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => switchTab(t.dataset.tab)));
+document.querySelectorAll('.stat.click').forEach(s => s.addEventListener('click', () => switchTab(s.dataset.goto)));
+$('alert-bell').addEventListener('click', () => switchTab('alerts'));
+$('settings-btn').addEventListener('click', () => switchTab('settings'));
+$('theme-btn').addEventListener('click', cycleTheme);
+document.querySelectorAll('[data-theme-set]').forEach(b => b.addEventListener('click', () => {
+  state.theme = b.dataset.themeSet;
+  localStorage.setItem('am_theme', state.theme);
+  applyTheme();
+}));
+
+// ══════════════════════════════════════════════════════════════════════
+// Canvas graphs (gap-aware, hover tooltip)
+// ══════════════════════════════════════════════════════════════════════
+const GAP_MS = 8000; // break line if points are farther apart than this
+const graphs = {}; // id -> {canvas, series, hover}
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function makeGraph(id, series) {
+  const canvas = $(id);
+  if (!canvas) return;
+  graphs[id] = {canvas, series, data: [], hover: -1};
+  canvas.addEventListener('mousemove', e => onGraphHover(id, e));
+  canvas.addEventListener('mouseleave', () => {
+    const g = graphs[id];
+    if (g) { g.hover = -1; drawGraph(id); }
+    $('tooltip').style.display = 'none';
+  });
+  // Redraw on resize
+  new ResizeObserver(() => drawGraph(id)).observe(canvas);
+}
+
+function setupCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+    canvas.width = w * dpr; canvas.height = h * dpr;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return {ctx, w, h};
+}
+
+function drawGraph(id) {
+  const g = graphs[id];
+  if (!g || !g.data.length) return;
+  const {ctx, w, h} = setupCanvas(g.canvas);
+  const pad = {l: 4, r: 4, t: 6, b: 4};
+  const pw = w - pad.l - pad.r, ph = h - pad.t - pad.b;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // y max
+  let yMax = 0;
+  for (const s of g.series) for (const p of s.points) if (p[1] > yMax) yMax = p[1];
+  if (g.series[0].yMax) yMax = Math.max(yMax, g.series[0].yMax);
+  if (yMax <= 0) yMax = g.series[0].yDefault || 1;
+  yMax = niceMax(yMax);
+
+  // time range
+  let t0 = Infinity, t1 = -Infinity;
+  for (const s of g.series) for (const p of s.points) { if (p[0] < t0) t0 = p[0]; if (p[0] > t1) t1 = p[0]; }
+  const span = Math.max(t1 - t0, 1);
+
+  const x = ts => pad.l + (ts - t0) / span * pw;
+  const y = v => pad.t + ph - (v / yMax) * ph;
+
+  // grid: 3 horizontal lines
+  ctx.strokeStyle = cssVar('--border'); ctx.lineWidth = 1; ctx.globalAlpha = .5;
+  for (let i = 1; i <= 3; i++) {
+    const gy = pad.t + ph * i / 4;
+    ctx.beginPath(); ctx.moveTo(pad.l, gy); ctx.lineTo(w - pad.r, gy); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // series
+  for (const s of g.series) {
+    const pts = s.points;
+    if (pts.length < 2) continue;
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 1.6;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < pts.length; i++) {
+      const px = x(pts[i][0]), py = y(pts[i][1]);
+      if (!started) { ctx.moveTo(px, py); started = true; }
+      else {
+        const gap = pts[i][0] - pts[i-1][0];
+        if (gap > GAP_MS / 1000) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+    }
+    ctx.stroke();
+    // fill
+    if (s.fill) {
+      ctx.globalAlpha = .10;
+      ctx.lineTo(x(pts[pts.length-1][0]), pad.t + ph);
+      ctx.lineTo(x(pts[0][0]), pad.t + ph);
+      ctx.closePath();
+      ctx.fillStyle = s.color;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // hover marker
+  if (g.hover >= 0 && g.hover < (g.data[0]?.length || 0)) {
+    const ts = g.data[0][g.hover][0];
+    ctx.strokeStyle = cssVar('--dim'); ctx.lineWidth = 1; ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.moveTo(x(ts), pad.t); ctx.lineTo(x(ts), pad.t + ph); ctx.stroke();
+    ctx.setLineDash([]);
+    for (const s of g.series) {
+      const p = s.points[g.hover];
+      if (!p) continue;
+      ctx.beginPath(); ctx.arc(x(p[0]), y(p[1]), 3, 0, Math.PI*2);
+      ctx.fillStyle = s.color; ctx.fill();
+    }
+  }
+
+  // time labels (graph-time div follows the .graph-wrap)
+  const wrapEl = g.canvas.parentElement;
+  const timeEl = wrapEl ? wrapEl.nextElementSibling : null;
+  if (timeEl && timeEl.classList.contains('graph-time')) {
+    const tl = timeEl.children[0], tr = timeEl.children[1];
+    if (tl) tl.textContent = fmtTime(t0);
+    if (tr) tr.textContent = fmtTime(t1);
+  }
+}
+
+function niceMax(v) {
+  const pow = Math.pow(10, Math.floor(Math.log10(v)));
+  const n = v / pow;
+  let m;
+  if (n <= 1) m = 1; else if (n <= 2) m = 2; else if (n <= 5) m = 5; else m = 10;
+  return m * pow;
+}
+
+function onGraphHover(id, e) {
+  const g = graphs[id];
+  if (!g || !g.data.length) return;
+  const rect = g.canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const pad = 4, pw = rect.width - pad*2;
+  let t0 = Infinity, t1 = -Infinity;
+  for (const s of g.series) for (const p of s.points) { if (p[0] < t0) t0 = p[0]; if (p[0] > t1) t1 = p[0]; }
+  const span = Math.max(t1 - t0, 1);
+  const ts = t0 + (mx - pad) / pw * span;
+  // nearest point in first series
+  const pts = g.series[0].points;
+  let best = -1, bd = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const d = Math.abs(pts[i][0] - ts);
+    if (d < bd) { bd = d; best = i; }
+  }
+  g.hover = best;
+  drawGraph(id);
+  if (best >= 0) {
+    const tt = $('tooltip');
+    let html = `<div class="tt-time">${fmtTime(pts[best][0])}</div>`;
+    for (const s of g.series) {
+      const p = s.points[best];
+      if (!p) continue;
+      html += `<div class="tt-row"><span class="sw" style="background:${s.color}"></span>${esc(s.label)}: <b>${s.fmt ? s.fmt(p[1]) : p[1]}</b></div>`;
+    }
+    tt.innerHTML = html;
+    tt.style.display = 'block';
+    const tw = tt.offsetWidth, th = tt.offsetHeight;
+    let tx = e.clientX + 14, ty = e.clientY + 14;
+    if (tx + tw > innerWidth - 8) tx = e.clientX - tw - 14;
+    if (ty + th > innerHeight - 8) ty = e.clientY - th - 14;
+    tt.style.left = tx + 'px'; tt.style.top = ty + 'px';
+  }
+}
+
+function setGraphData(id, seriesData) {
+  const g = graphs[id];
+  if (!g) return;
+  g.data = seriesData;
+  for (let i = 0; i < g.series.length; i++) {
+    g.series[i].points = seriesData[i] || [];
+  }
+  drawGraph(id);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Data fetching
+// ══════════════════════════════════════════════════════════════════════
+function barClass(pct) { return pct >= 90 ? 'crit' : pct >= 75 ? 'warn' : 'ok'; }
+function setBar(id, pct) {
+  const el = $(id);
+  if (!el) return;
+  el.style.width = Math.min(pct, 100) + '%';
+  el.className = 'fill ' + barClass(pct);
+}
+
+async function fetchData() {
+  if (!state.visible) return;
+  const tab = state.tab;
+  const jobs = [
+    api('/api/summary').then(renderSummary).catch(e => {}),
+    api('/api/health').then(renderHealth).catch(e => {}),
+    api('/api/alerts').then(renderAlerts).catch(e => {}),
+  ];
+  if (tab === 'overview') jobs.push(
+    api('/api/net-history').then(d => {
+      setGraphData('net-graph', [d.map(p => [p[0], p[1]]), d.map(p => [p[0], p[2]])]);
+    }).catch(e => {})
+  );
+  if (tab === 'cpu') jobs.push(
+    api('/api/cpu').then(renderCpu).catch(showError),
+    api('/api/cpu-freq-history').then(d => setGraphData('cpu-freq-graph', [d.map(p => [p[0], p[1]])])).catch(e => {})
+  );
+  if (tab === 'gpu') jobs.push(
+    api('/api/gpu').then(renderGpu).catch(showError),
+    api('/api/gpu-history').then(d => {
+      const ids = Object.keys(d);
+      for (const id of ids) {
+        setGraphData('gpu-graph-' + id, [
+          d[id].map(p => [p[0], p[1]]),
+          d[id].map(p => [p[0], p[2]]),
+        ]);
+      }
+    }).catch(e => {})
+  );
+  if (tab === 'memory') jobs.push(api('/api/memory').then(renderMemory).catch(showError));
+  if (tab === 'storage') jobs.push(
+    api('/api/storage').then(renderStorage).catch(showError),
+    api('/api/disk-io-history').then(d => {
+      // d: [ts, {disk: [read_mbps, write_mbps]}]
+      const disks = new Set();
+      d.forEach(p => Object.keys(p[1]).forEach(k => disks.add(k)));
+      const seriesData = [];
+      for (const disk of disks) {
+        seriesData.push(d.map(p => [p[0], (p[1][disk] || [0,0])[0]]));  // read
+        seriesData.push(d.map(p => [p[0], (p[1][disk] || [0,0])[1]]));  // write
+      }
+      setGraphData('disk-graph', seriesData);
+    }).catch(e => {})
+  );
+  if (tab === 'network') jobs.push(
+    api('/api/network').then(renderNetwork).catch(showError),
+    api('/api/net-history').then(d => setGraphData('net-graph-2', [d.map(p => [p[0], p[1]]), d.map(p => [p[0], p[2]])])).catch(e => {})
+  );
+  if (tab === 'temps') jobs.push(api('/api/temps').then(renderTemps).catch(showError));
+  if (tab === 'processes') jobs.push(
+    api(`/api/processes?sort_by=${state.procSort}${state.procSearch ? '&search=' + encodeURIComponent(state.procSearch) : ''}`)
+      .then(renderProcesses).catch(showError)
+  );
+  if (tab === 'logs') fetchLogs();
+  if (tab === 'settings') fetchKeys();
+  await Promise.allSettled(jobs);
+}
+
+function fetchLogs() {
+  const level = $('log-level').value;
+  const unit = $('log-unit').value;
+  const search = $('log-search').value.trim();
+  const noisy = $('log-noisy').checked;
+  let q = `/api/logs?lines=100&level=${level}${unit ? '&unit=' + encodeURIComponent(unit) : ''}${search ? '&search=' + encodeURIComponent(search) : ''}&noisy=${noisy}`;
+  api(q).then(d => {
+    $('log-area').textContent = d.logs.length ? d.logs.join('\n') : '(no log entries)';
+    const sel = $('log-unit');
+    const cur = sel.value;
+    if (!unit) {
+      sel.innerHTML = '<option value="">All units</option>' + d.units.map(u => `<option value="${esc(u)}">${esc(u)}</option>`).join('');
+      sel.value = cur;
+    }
+  }).catch(e => { $('log-area').textContent = 'Error: ' + e.message; });
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Renderers
+// ══════════════════════════════════════════════════════════════════════
+function renderSummary(s) {
+  $('ov-cpu-pct').textContent = s.cpu_percent + '%';
+  $('ov-cpu-sub').textContent = `${s.cpu_temp_max ? s.cpu_temp_max + '°C' : ''} ${s.cpu_power_w ? '· ' + s.cpu_power_w + 'W' : ''}`.trim();
+  $('ov-mem-pct').textContent = s.mem_percent + '%';
+  $('ov-mem-sub').textContent = `${s.mem_used_gb} / ${s.mem_total_gb} GB`;
+  $('ov-gpu-val').textContent = s.gpu_count ? s.gpu_count + ' GPU' : '—';
+  $('ov-gpu-sub').textContent = [s.gpu_temp_max ? s.gpu_temp_max + '°C' : '', s.gpu_power_w ? s.gpu_power_w + 'W' : '', s.gpu_vram_used_mb ? s.gpu_vram_used_mb + 'MB VRAM' : ''].filter(Boolean).join(' · ') || 'no data';
+  $('ov-net-rx').textContent = fmtRate(s.net_rx_mbps);
+  $('ov-net-tx').textContent = '↑ ' + fmtRate(s.net_tx_mbps);
+  $('ov-disk-pct').textContent = s.disk_max_percent + '%';
+  $('ov-disk-sub').textContent = 'max usage · I/O ' + s.disk_io_mbps + ' MB/s';
+  $('ov-uptime').textContent = s.uptime_str;
+  $('ov-load').textContent = `load ${s.load_avg.join(' ')} · ${s.cores} cores`;
+  $('uptime-text').textContent = s.uptime_str;
+  $('load-text').textContent = s.load_avg[0];
+}
+function fmtRate(mbps) { return mbps >= 1000 ? (mbps/1000).toFixed(2) + ' Gbps' : mbps.toFixed(1) + ' Mbps'; }
+
+function renderHealth(h) {
+  $('version-badge').textContent = 'v' + h.version;
+  const dot = $('status-dot');
+  dot.className = 'status-dot' + (h.status === 'warning' ? ' warn' : '');
+}
+
+function renderAlerts(a) {
+  const n = a.active.length;
+  $('alert-count').textContent = n;
+  $('alert-count').style.display = n ? 'block' : 'none';
+  $('tab-alert-badge').textContent = n;
+  $('tab-alert-badge').style.display = n ? 'inline' : 'none';
+  $('alert-active-badge').textContent = n;
+  $('alert-hist-badge').textContent = a.history.length;
+
+  // overview mini list (top 3)
+  $('ov-alerts').innerHTML = a.active.slice(0, 3).map(al =>
+    `<div class="alert-item ${al.severity} ${al.acknowledged ? 'acked' : ''}"><span class="icon">${al.severity === 'danger' ? '🔴' : '🟠'}</span>
+     <div class="body"><div class="msg">${esc(al.message)}</div><div class="meta">since ${esc(al.since)}${al.acknowledged ? ' · acknowledged' : ''}</div></div></div>`
+  ).join('');
+
+  // full panel
+  $('alert-active-list').innerHTML = n ? a.active.map(al =>
+    `<div class="alert-item ${al.severity} ${al.acknowledged ? 'acked' : ''}">
+      <span class="icon">${al.severity === 'danger' ? '🔴' : '🟠'}</span>
+      <div class="body"><div class="msg">${esc(al.message)}</div>
+      <div class="meta">since ${esc(al.since)}${al.acknowledged ? ' · acknowledged ' + esc(al.acknowledged_at) : ''}</div></div>
+      <div class="actions">
+        ${al.acknowledged ? '' : `<button class="mini-btn" onclick="ackAlert('${esc(al.rule_id)}')">Acknowledge</button>`}
+        <button class="mini-btn danger" onclick="delAlert('${esc(al.rule_id)}')">Delete</button>
+      </div></div>`
+  ).join('') : `<div class="empty"><div class="big">✅</div>No active alerts. All clear.</div>`;
+
+  $('alert-hist-list').innerHTML = a.history.length ? a.history.map((h, i) =>
+    `<div class="alert-item ${h.severity} acked">
+      <span class="icon">✅</span>
+      <div class="body"><div class="msg">${esc(h.message)}</div>
+      <div class="meta">since ${esc(h.since)} · resolved ${esc(h.resolved_at || '?')}${h.deleted_at ? ' · deleted' : ''}</div></div>
+      <div class="actions"><button class="mini-btn danger" onclick="delHist(${i})">Delete</button></div></div>`
+  ).join('') : `<div class="empty">No resolved alerts yet.</div>`;
+}
+async function ackAlert(rid) {
+  try { await api('/api/alerts/ack?rule_id=' + encodeURIComponent(rid), {method: 'POST'}); fetchData(); }
+  catch (e) { showError(e.message); }
+}
+async function delAlert(rid) {
+  try { await api('/api/alerts/active?rule_id=' + encodeURIComponent(rid), {method: 'DELETE'}); fetchData(); }
+  catch (e) { showError(e.message); }
+}
+async function delHist(i) {
+  try { await api('/api/alerts/history/' + i, {method: 'DELETE'}); fetchData(); }
+  catch (e) { showError(e.message); }
+}
+$('clear-resolved-btn').addEventListener('click', async () => {
+  try { await api('/api/alerts/clear-resolved', {method: 'POST'}); fetchData(); }
+  catch (e) { showError(e.message); }
+});
+
+function renderCpu(c) {
+  $('cpu-model').textContent = c.model;
+  $('cpu-badge').textContent = c.threads + ' threads';
+  $('cpu-cores').textContent = `${c.cores} cores / ${c.threads} threads`;
+  $('cpu-freq').textContent = `${(c.freq_current/1000).toFixed(2)} GHz (${(c.freq_min/1000).toFixed(1)}–${(c.freq_max/1000).toFixed(1)} GHz)`;
+  $('cpu-load').textContent = c.load_avg.join('  ');
+  $('cpu-power').textContent = c.power_w ? `${c.power_w} W${c.power_limit_w ? ' / limit ' + c.power_limit_w + ' W' : ''}` : 'N/A';
+  $('cpu-cache-info').innerHTML = Object.entries(c.cache).map(([k, v]) =>
+    `<div class="row"><span class="label">${esc(k)}</span><span class="value">${esc(v)}</span></div>`).join('');
+  setBar('cpu-bar', c.usage_percent);
+  $('cpu-cores-badge').textContent = c.usage_percent + '% avg';
+  $('cpu-cores-grid').innerHTML = c.usage_per_core.map((u, i) =>
+    `<div class="core"><div class="label">C${i}</div><div class="value">${u.toFixed(0)}%</div><div class="bar"><div class="fill ${barClass(u)}" style="width:${u}%"></div></div></div>`).join('');
+  const maxT = Math.max(...c.core_temps.map(t => t.temp_c), 0);
+  $('cpu-temps-badge').textContent = maxT ? maxT + '°C max' : '';
+  $('cpu-temps-grid').innerHTML = c.core_temps.map(t => {
+    const cls = t.crit_c && t.temp_c > t.crit_c * .9 ? 'hot' : t.temp_c > 80 ? 'warm' : '';
+    return `<div class="core ${cls}"><div class="label">${esc(t.label)}</div><div class="value">${t.temp_c}°C</div></div>`;
+  }).join('');
+}
+
+function renderGpu(g) {
+  const all = [...(g.rocm || []), ...(g.intel || []), ...(g.sysfs || [])];
+  const wrap = $('gpu-cards');
+  if (!all.length) { wrap.innerHTML = '<div class="empty">No GPUs detected.</div>'; return; }
+  wrap.innerHTML = all.map((gpu, i) => {
+    let body = '';
+    if (gpu.id) {
+      const util = gpu.utilization ?? gpu.total_usage ?? 0;
+      body += `<div class="row"><span class="label">Utilization</span><span class="value">${util}%</span></div>
+               <div class="bar"><div class="fill ${barClass(util)}" style="width:${util}%"></div></div>`;
+      if (gpu.vram_total_mb) {
+        body += `<div class="row"><span class="label">VRAM</span><span class="value">${gpu.vram_used_mb} / ${gpu.vram_total_mb} MB (${gpu.vram_percent || 0}%)</span></div>
+                 <div class="bar"><div class="fill ${barClass(gpu.vram_percent || 0)}" style="width:${gpu.vram_percent || 0}%"></div></div>`;
+      }
+      const temp = gpu.temp_edge ?? gpu.temperature ?? 0;
+      if (temp) body += `<div class="row"><span class="label">Temperature</span><span class="value">${temp}°C</span></div>`;
+      if (gpu.power_w) body += `<div class="row"><span class="label">Power</span><span class="value">${gpu.power_w} W</span></div>`;
+      if (gpu.freq_actual_mhz) body += `<div class="row"><span class="label">Frequency</span><span class="value">${gpu.freq_actual_mhz} MHz</span></div>`;
+      if (gpu.sclk) body += `<div class="row"><span class="label">Clocks (S/M/SOC)</span><span class="value">${gpu.sclk} / ${gpu.mclk} / ${gpu.socclk} MHz</span></div>`;
+      if (gpu.render_usage !== undefined) {
+        body += `<div class="gpu-engines">
+          <div class="gpu-engine"><div class="label">Render</div><div class="value">${gpu.render_usage}%</div></div>
+          <div class="gpu-engine"><div class="label">Blitter</div><div class="value">${gpu.blitter_usage}%</div></div>
+          <div class="gpu-engine"><div class="label">Video</div><div class="value">${gpu.video_usage}%</div></div>
+          <div class="gpu-engine"><div class="label">Compute</div><div class="value">${gpu.compute_usage}%</div></div>
+        </div>`;
+      }
+      if (gpu.pids && gpu.pids.length) {
+        body += `<div style="margin-top:8px;font-size:12px;color:var(--muted)">Processes:</div>` +
+          gpu.pids.map(p => `<div class="row"><span class="label" style="max-width:220px;overflow:hidden;text-overflow:ellipsis">${esc(p.name)} (PID ${p.pid})</span><span class="value">${p.vram_used_mb} MB VRAM</span></div>`).join('');
+      }
+      body += `<div class="graph-wrap" style="margin-top:10px"><canvas id="gpu-graph-${esc(gpu.id)}" class="graph small"></canvas></div>`;
+    }
+    return `<div class="card gpu-card"><div class="card-header"><h2>${esc(gpu.name)}</h2><span class="badge">${esc(gpu.bus_id || '')}</span></div><div class="card-body open">${body}</div></div>`;
+  }).join('');
+  // init new canvases (keyed by GPU id so history mapping stays correct)
+  all.forEach(gpu => {
+    if (gpu.id && !graphs['gpu-graph-' + gpu.id]) {
+      makeGraph('gpu-graph-' + gpu.id, [
+        {label: 'Util %', color: cssVar('--accent'), fill: true, yDefault: 100},
+        {label: 'VRAM %', color: cssVar('--purple')},
+      ]);
+      drawGraph('gpu-graph-' + gpu.id);
+    }
+  });
+}
+
+function renderMemory(m) {
+  $('mem-badge').textContent = m.percent + '%';
+  $('mem-total').textContent = m.total_gb + ' GB';
+  $('mem-used').textContent = m.used_gb + ' GB';
+  $('mem-available').textContent = m.available_gb + ' GB';
+  $('mem-cached').textContent = `${m.cached_gb} / ${m.buffers_gb} GB`;
+  setBar('mem-bar', m.percent);
+  $('mem-swap').textContent = m.swap_total_gb > 0 ? `${m.swap_used_gb} / ${m.swap_total_gb} GB (${m.swap_percent}%)` : 'none';
+  setBar('swap-bar', m.swap_percent);
+  $('mem-procs-badge').textContent = m.proc_memory.length + ' procs';
+  $('mem-procs-table').innerHTML = m.proc_memory.map(p =>
+    `<tr><td>${p.pid}</td><td class="wrap">${esc(p.name)}</td><td class="num">${p.rss_mb} MB</td><td class="num">${p.percent}%</td></tr>`).join('');
+}
+
+function renderStorage(s) {
+  $('part-badge').textContent = s.partitions.length + ' mounts';
+  $('part-list').innerHTML = s.partitions.map(p =>
+    `<div style="margin-bottom:10px"><div class="row"><span class="label" style="font-family:monospace;font-size:12px">${esc(p.mountpoint)} <span style="color:var(--muted)">(${esc(p.device)}, ${esc(p.fstype)})</span></span>
+     <span class="value">${p.used_gb} / ${p.total_gb} GB · ${p.percent}%</span></div>
+     <div class="bar"><div class="fill ${barClass(p.percent)}" style="width:${p.percent}%"></div></div></div>`).join('');
+
+  const disks = Object.entries(s.disks || {});
+  $('disk-table').innerHTML = disks.map(([name, d]) =>
+    `<tr><td style="font-family:monospace">${esc(name)}</td><td class="num">${fmtBytes(d.read_mb)}</td><td class="num">${fmtBytes(d.write_mb)}</td>
+     <td class="num">${d.read_rate_mbps} MB/s</td><td class="num">${d.write_rate_mbps} MB/s</td></tr>`).join('') || '<tr><td colspan="5" class="empty">no disk I/O data</td></tr>';
+
+  const smart = Object.entries(s.smart || {});
+  $('smart-badge').textContent = smart.length + ' drives';
+  $('smart-table').innerHTML = smart.map(([dev, d]) => {
+    const cls = d.health === 'OK' ? 'ok' : d.health === 'N/A' ? 'muted' : 'crit';
+    const life = d.percentage_used !== undefined && d.percentage_used !== null ? (100 - d.percentage_used) + '% left' : '—';
+    return `<tr><td style="font-family:monospace">${esc(dev)}</td><td class="wrap">${esc(d.model || '—')}</td>
+      <td><span class="pill ${cls}">${esc(d.health)}</span></td>
+      <td class="num">${d.temperature ? d.temperature + '°C' : '—'}</td>
+      <td class="num">${life}</td>
+      <td class="num">${d.read_tb !== undefined ? d.read_tb + ' TB' : '—'}</td>
+      <td class="num">${d.write_tb !== undefined ? d.write_tb + ' TB' : '—'}</td>
+      <td class="num">${d.power_on_hours ? d.power_on_hours + ' h' : '—'}</td></tr>`;
+  }).join('') || '<tr><td colspan="8" class="empty">SMART data unavailable</td></tr>';
+
+  // disk graph legend (series order: disk1 R, disk1 W, disk2 R, disk2 W, ...)
+  const legend = $('disk-legend');
+  const colors = ['var(--cyan)', 'var(--orange)', 'var(--green)', 'var(--purple)', 'var(--accent)', 'var(--red)'];
+  legend.innerHTML = Object.keys(s.disks || {}).slice(0, 3).map((name, i) =>
+    `<span class="lg"><span class="sw" style="background:${colors[2*i]}"></span>${esc(name)} read</span>
+     <span class="lg"><span class="sw" style="background:${colors[2*i+1]}"></span>write</span>`).join('');
+}
+
+function renderNetwork(n) {
+  const showV = $('show-virtual').checked;
+  $('net-table').innerHTML = n.interfaces
+    .filter(i => showV || !i.virtual)
+    .map(i => `<tr><td style="font-family:monospace">${esc(i.name)}</td>
+      <td><span class="pill ${i.operstate === 'up' ? 'ok' : 'muted'}">${esc(i.operstate)}</span></td>
+      <td class="num">${i.speed_mbps ? i.speed_mbps + ' Mb' : '—'}</td>
+      <td class="num">${fmtRate(i.rx_mbps)}</td>
+      <td class="num">${fmtRate(i.tx_mbps)}</td>
+      <td class="num">${fmtBytes(i.rx_mb)}</td>
+      <td class="num">${fmtBytes(i.tx_mb)}</td>
+      <td class="num">${i.rx_errors + i.tx_errors + i.rx_drop + i.tx_drop}</td></tr>`).join('');
+}
+
+function renderTemps(t) {
+  $('temp-badge').textContent = t.sensors.length + ' sensors';
+  $('temp-table').innerHTML = t.sensors.map(s => {
+    const pct = s.crit_c ? s.temp_c / s.crit_c : 0;
+    const cls = s.crit_c && pct > .9 ? 'crit' : s.temp_c > 80 ? 'warn' : 'ok';
+    return `<tr><td>${esc(s.chip)}</td><td>${esc(s.label)}</td>
+      <td class="num"><b>${s.temp_c}°C</b></td>
+      <td class="num">${s.max_c ? s.max_c + '°C' : '—'}</td>
+      <td class="num">${s.crit_c ? s.crit_c + '°C' : '—'}</td>
+      <td><span class="pill ${cls}">${s.crit_c && pct > .9 ? 'HIGH' : 'OK'}</span></td></tr>`;
+  }).join('');
+  const hasFans = t.fans.length > 0;
+  $('fan-card').style.display = hasFans ? 'block' : 'none';
+  if (hasFans) $('fan-table').innerHTML = t.fans.map(f =>
+    `<tr><td>${esc(f.chip)}</td><td>${esc(f.label)}</td><td class="num">${f.rpm}</td><td class="num">${f.max_rpm || '—'}</td></tr>`).join('');
+}
+
+function renderProcesses(procs) {
+  $('proc-badge').textContent = procs.length + ' shown';
+  $('proc-table').innerHTML = procs.map(p =>
+    `<tr><td>${p.pid}</td><td class="wrap" title="${esc(p.name)}">${esc(p.name)}</td><td>${esc(p.username)}</td>
+     <td class="num">${p.cpu}%</td><td class="num">${p.mem}%</td><td class="num">${p.rss_mb} MB</td>
+     <td><span class="pill muted">${esc(p.status)}</span></td><td class="num">${fmtUptime(p.uptime_s)}</td></tr>`).join('')
+    || '<tr><td colspan="8" class="empty">no matching processes</td></tr>';
+  ['cpu', 'mem', 'rss_mb'].forEach(k => {
+    const el = $('arr-' + k);
+    if (el) el.textContent = state.procSort === k ? '▼' : '';
+  });
+}
+document.querySelectorAll('th.sortable').forEach(th => th.addEventListener('click', () => {
+  state.procSort = th.dataset.sort;
+  fetchData();
+}));
+$('proc-search').addEventListener('input', e => { state.procSearch = e.target.value.trim(); fetchData(); });
+
+// Logs controls
+['log-level', 'log-unit'].forEach(id => $(id).addEventListener('change', fetchLogs));
+$('log-search').addEventListener('keydown', e => { if (e.key === 'Enter') fetchLogs(); });
+$('log-noisy').addEventListener('change', fetchLogs);
+$('log-refresh').addEventListener('click', fetchLogs);
+$('show-virtual').addEventListener('change', fetchData);
+
+// ══════════════════════════════════════════════════════════════════════
+// Settings
+// ══════════════════════════════════════════════════════════════════════
+async function fetchKeys() {
+  try {
+    const keys = await api('/api/auth/keys');
+    $('key-list').innerHTML = keys.length ? keys.map(k =>
+      `<div class="key-row"><span class="name">${esc(k.name)}</span>
+       <span class="meta">${esc(k.prefix)} · created ${esc(k.created_at)}${k.last_used ? ' · used ' + esc(k.last_used) : ''}</span>
+       <button class="mini-btn danger" onclick="delKey('${esc(k.name)}')">Delete</button></div>`).join('')
+      : '<div class="empty" style="padding:10px">No API keys yet.</div>';
+  } catch (e) { $('key-list').innerHTML = `<div class="empty">Only the web admin can manage keys.</div>`; }
+}
+async function delKey(name) {
+  try { await api('/api/auth/keys/' + encodeURIComponent(name), {method: 'DELETE'}); fetchKeys(); }
+  catch (e) { showError(e.message); }
+}
+$('key-create-btn').addEventListener('click', async () => {
+  const name = $('key-name').value.trim();
+  const msg = $('key-msg');
+  msg.className = 'set-msg';
+  if (!name) { msg.textContent = 'Enter a name'; msg.classList.add('err'); return; }
+  try {
+    const r = await api('/api/auth/keys', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name})});
+    msg.textContent = 'Created: ' + r.key;
+    msg.classList.add('ok');
+    msg.style.wordBreak = 'break-all';
+    $('key-name').value = '';
+    fetchKeys();
+  } catch (e) { msg.textContent = e.message; msg.classList.add('err'); }
+});
+$('pw-change-btn').addEventListener('click', async () => {
+  const msg = $('pw-msg');
+  msg.className = 'set-msg';
+  if ($('pw-new').value !== $('pw-new2').value) { msg.textContent = 'New passwords do not match'; msg.classList.add('err'); return; }
+  try {
+    await api('/api/auth/password', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({old_password: $('pw-old').value, new_password: $('pw-new').value})});
+    msg.textContent = 'Password changed ✓';
+    msg.classList.add('ok');
+    $('pw-old').value = $('pw-new').value = $('pw-new2').value = '';
+  } catch (e) { msg.textContent = e.message; msg.classList.add('err'); }
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// Refresh loop (only while page visible)
+// ══════════════════════════════════════════════════════════════════════
+function startRefresh() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(() => { if (state.visible) fetchData(); }, REFRESH_MS);
+  fetchData();
+}
+function stopRefresh() {
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  state.visible = !document.hidden;
+  const st = $('refresh-status');
+  if (state.visible) { st.classList.remove('paused'); $('refresh-text').textContent = 'Live'; }
+  else { st.classList.add('paused'); $('refresh-text').textContent = 'Paused'; }
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// Init
+// ══════════════════════════════════════════════════════════════════════
+makeGraph('net-graph', [
+  {label: 'Download', color: cssVar('--cyan'), fill: true, fmt: fmtRate, yDefault: 10},
+  {label: 'Upload', color: cssVar('--purple'), fmt: fmtRate},
+]);
+makeGraph('net-graph-2', [
+  {label: 'Download', color: cssVar('--cyan'), fill: true, fmt: fmtRate, yDefault: 10},
+  {label: 'Upload', color: cssVar('--purple'), fmt: fmtRate},
+]);
+makeGraph('cpu-freq-graph', [
+  {label: 'Frequency', color: cssVar('--accent'), fill: true, fmt: v => (v/1000).toFixed(2) + ' GHz', yDefault: 1000},
+]);
+makeGraph('disk-graph', [
+  {label: '', color: cssVar('--cyan'), fill: true, fmt: v => v + ' MB/s'},
+  {label: '', color: cssVar('--orange'), fmt: v => v + ' MB/s'},
+  {label: '', color: cssVar('--green'), fmt: v => v + ' MB/s'},
+  {label: '', color: cssVar('--purple'), fmt: v => v + ' MB/s'},
+  {label: '', color: cssVar('--accent'), fmt: v => v + ' MB/s'},
+  {label: '', color: cssVar('--red'), fmt: v => v + ' MB/s'},
+]);
+// time label ids for graphs
+['net-graph', 'net-graph-2', 'cpu-freq-graph', 'disk-graph'].forEach(id => {
+  // drawGraph looks for time-<id>; we use per-graph ids instead
+});
+initAuth();
+</script>
+</body>
+</html>
