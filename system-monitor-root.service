@@ -4,15 +4,20 @@ After=network.target
 
 [Service]
 Type=simple
+# Adjust path to your install location (deploy.sh default: /opt/system-monitor)
 ExecStart=/usr/bin/python3 /opt/system-monitor/server.py
 WorkingDirectory=/opt/system-monitor
 Restart=on-failure
 RestartSec=5
 User=root
+# Memory limit (sampler threads keep a small cache; API is on-demand)
 MemoryMax=256M
 LimitNOFILE=2048
 Environment=AI_MONITOR_PORT=9527
-Environment=AI_MONITOR_HOST=0.0.0.0
+# Bind to loopback when behind a reverse proxy (Caddy/nginx); use 0.0.0.0 for direct access
+Environment=AI_MONITOR_HOST=127.0.0.1
+Environment=AI_MONITOR_DATA_DIR=/opt/system-monitor/data
+Environment=AI_MONITOR_DEBUG=0
 
 [Install]
 WantedBy=multi-user.target
