@@ -34,7 +34,7 @@ A lightweight performance monitor for AI / home servers. Key design:
 
 ## 特性 / Features
 
-- 🔐 **多用户认证** — 首次打开创建管理员；管理员可创建/删除/重置密码/升降级普通用户；每个用户管理自己的 API Key
+- 🔐 **多用户认证** — 首次打开创建管理员；管理员可创建/删除/重置密码/升降级普通用户；每个用户可管理自己的 API Key
 - 🔔 **告警面板** — 磁盘/内存/温度/SMART/负载/VRAM 阈值告警，持久化历史；可确认(ack)、删除(保留日志)、清空
 - 🎨 **黑白双主题** — 跟随系统 `prefers-color-scheme` 自动切换，也可手动 深色/浅色/自动
 - 📈 **实时图表** — 网络吞吐、CPU 频率、磁盘 I/O、GPU 利用率/VRAM 曲线（Canvas 自绘，断线 + hover 提示）
@@ -49,6 +49,28 @@ A lightweight performance monitor for AI / home servers. Key design:
 - 🖥️ **Full coverage** — CPU / GPU (ROCm+Intel+sysfs) / memory / storage+SMART / network / temps / processes / system logs
 - ⚡ **High performance** — sampler thread + multi-level caching (SMART 60s, tool probe 5min), time-windowed history
 - 🔧 **CLI management** — `monitor-cli.py`: users, passwords, API keys, alerts
+
+## 界面预览 / Screenshots
+
+| 概览（深色）/ Overview (dark) | 概览（浅色）/ Overview (light) |
+|:---:|:---:|
+| ![Overview dark](docs/img/02-overview-dark.png) | ![Overview light](docs/img/10-overview-light.png) |
+
+| CPU | GPU |
+|:---:|:---:|
+| ![CPU](docs/img/03-cpu-dark.png) | ![GPU](docs/img/04-gpu-dark.png) |
+
+| 存储 / Storage | 网络 / Network |
+|:---:|:---:|
+| ![Storage](docs/img/05-storage-dark.png) | ![Network](docs/img/06-network-dark.png) |
+
+| 进程 / Processes | 系统日志 / System Logs |
+|:---:|:---:|
+| ![Processes](docs/img/07-processes-dark.png) | ![Logs](docs/img/08-logs-dark.png) |
+
+| 设置（用户 & API Key）/ Settings | 首次创建管理员 / First-run setup |
+|:---:|:---:|
+| ![Settings](docs/img/09-settings-dark.png) | ![Setup](docs/img/01-setup.png) |
 
 ## 角色与权限 / Roles & Permissions
 
@@ -65,7 +87,7 @@ A lightweight performance monitor for AI / home servers. Key design:
 
 ```bash
 # 克隆 / clone
-git clone https://github.com/your-username/system-monitor.git
+git clone https://github.com/xchgeaxeax/system-monitor.git
 cd system-monitor
 
 # Root 模式（完整功能：SMART/日志）/ Root mode (full features)
@@ -207,7 +229,7 @@ Alerts auto-trigger / auto-resolve (no false resolution when a data source is mi
 
 ```bash
 sudo systemctl stop system-monitor && sudo systemctl disable system-monitor
-sudo rm /etc/systemd/system/system-monitor-root.service
+sudo rm /etc/systemd/system/system-monitor.service
 sudo systemctl daemon-reload
 rm -rf /opt/system-monitor   # 含 data/ 认证数据 / includes data/ auth data
 ```
@@ -215,7 +237,7 @@ rm -rf /opt/system-monitor   # 含 data/ 认证数据 / includes data/ auth data
 ## 完整文档 / Full Documentation
 
 - 中文 / Chinese: [DOCUMENTATION.zh.md](DOCUMENTATION.zh.md)
-- English: [DOCUMENTATION.en.md](DOCUMENTATION.en.md)
+- English: [DOCUMENTATION.md](DOCUMENTATION.md)
 
 ## License
 
