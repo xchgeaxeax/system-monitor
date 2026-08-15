@@ -390,9 +390,10 @@ def collect_gpu_detail() -> Dict:
     return info
 
 
-# ── Auth ────────────────────────────────────────────────────────────────
+# ── Auth (multi-user: admin / regular) ─────────────────────────────────
 PBKDF2_ITER = 390000
 _auth_lock = threading.Lock()  # guards auth.json read-modify-write
+ROLES = ("admin", "user")
 
 
 def _hash_password(password: str, salt: bytes) -> str:
@@ -402,9 +403,20 @@ def _hash_password(password: str, salt: bytes) -> str:
 def _load_auth() -> Dict:
     try:
         with open(AUTH_FILE) as f:
-            return json.load(f)
+            data = json.load(f)
     except Exception:
         return {}
+    # Migrate v4.0 single-admin format -> multi-user
+    if data.get("admin") and not data.get("users"):
+        old = data.pop("admin")
+        uname = old.get("username", "admin")
+        old.pop("username", None)
+        data["users"] = {uname: {**old, "role": "admin"}}
+        # legacy keys belong to the first admin
+        for k in data.get("keys", {}).values():
+            k.setdefault("owner", uname)
+        _save_auth(data)
+    return data
 
 
 def _save_auth(data: Dict):
@@ -417,26 +429,40 @@ def _save_auth(data: Dict):
 
 def auth_configured() -> bool:
     with _auth_lock:
-        return bool(_load_auth().get("admin"))
+        return bool(_load_auth().get("users"))
 
 
-def verify_password(password: str, admin: Dict) -> bool:
-    salt = bytes.fromhex(admin.get("salt", ""))
-    return secrets.compare_digest(_hash_password(password, salt), admin.get("hash", ""))
+def verify_password(password: str, user: Dict) -> bool:
+    salt = bytes.fromhex(user.get("salt", ""))
+    return secrets.compare_digest(_hash_password(password, salt), user.get("hash", ""))
+
+
+def _public_user(u: Dict) -> Dict:
+    return {
+        "username": u.get("username"),
+        "role": u.get("role", "user"),
+        "created_at": u.get("created_at"),
+    }
+
+
+def _count_admins(data: Dict) -> int:
+    return sum(1 for u in data.get("users", {}).values() if u.get("role") == "admin")
 
 
 def create_admin(username: str, password: str) -> Dict:
+    """First-run setup: create the initial admin account."""
     salt = secrets.token_bytes(16)
     with _auth_lock:
         data = _load_auth()
-        if data.get("admin"):
-            raise HTTPException(409, "Auth already configured. Use monitor-cli.py to reset.")
-        data["admin"] = {
+        if data.get("users"):
+            raise HTTPException(409, "Auth already configured. Use monitor-cli.py to manage users.")
+        data["users"] = {username: {
             "username": username,
             "salt": salt.hex(),
             "hash": _hash_password(password, salt),
+            "role": "admin",
             "created_at": now_iso(),
-        }
+        }}
         data.setdefault("keys", {})
         data.setdefault("sessions", {})
         token = secrets.token_hex(32)
@@ -445,14 +471,14 @@ def create_admin(username: str, password: str) -> Dict:
             "created_at": now_iso(), "expires_at": time.time() + SESSION_TTL_S,
         }
         _save_auth(data)
-    return {"token": token, "username": username, "expires_in": SESSION_TTL_S}
+    return {"token": token, "username": username, "role": "admin", "expires_in": SESSION_TTL_S}
 
 
 def login(username: str, password: str) -> Dict:
     # Verify outside the lock (PBKDF2 takes ~100ms)
     with _auth_lock:
-        admin = _load_auth().get("admin")
-    if not admin or admin.get("username") != username or not verify_password(password, admin):
+        user = _load_auth().get("users", {}).get(username)
+    if not user or not verify_password(password, user):
         raise HTTPException(401, "Invalid username or password")
     token = secrets.token_hex(32)
     with _auth_lock:
@@ -462,7 +488,8 @@ def login(username: str, password: str) -> Dict:
             "created_at": now_iso(), "expires_at": time.time() + SESSION_TTL_S,
         }
         _save_auth(data)
-    return {"token": token, "username": username, "expires_in": SESSION_TTL_S}
+    return {"token": token, "username": username, "role": user.get("role", "user"),
+            "expires_in": SESSION_TTL_S}
 
 
 def _resolve_token(token: str) -> Optional[Dict]:
@@ -473,7 +500,13 @@ def _resolve_token(token: str) -> Optional[Dict]:
         # API key?
         for key in data.get("keys", {}).values():
             if secrets.compare_digest(key.get("key", ""), token):
-                return {"username": key.get("name", "api"), "kind": "api_key"}
+                return {
+                    "username": key.get("owner", "admin"),
+                    "kind": "api_key",
+                    "key_name": key.get("name"),
+                    "role": "admin" if key.get("owner", "admin") in data.get("users", {})
+                            and data["users"][key.get("owner", "admin")].get("role") == "admin" else "user",
+                }
         # Session?
         sess = data.get("sessions", {}).get(token)
         if not sess:
@@ -482,7 +515,13 @@ def _resolve_token(token: str) -> Optional[Dict]:
             del data["sessions"][token]
             _save_auth(data)
             return None
-        return {"username": sess.get("username", "?"), "kind": "web"}
+        uname = sess.get("username", "?")
+        user = data.get("users", {}).get(uname)
+        if not user:  # user was deleted after login
+            del data["sessions"][token]
+            _save_auth(data)
+            return None
+        return {"username": uname, "kind": "web", "role": user.get("role", "user")}
 
 
 def _extract_token(request: Request) -> str:
@@ -495,9 +534,9 @@ def _extract_token(request: Request) -> str:
 def require_auth(request: Request) -> Dict:
     token = _extract_token(request)
     if not auth_configured():
-        # First-run: only /api/auth/setup allowed, everything else needs setup first
+        # First-run: only setup/status/health allowed before first admin exists
         if request.url.path in ("/api/auth/setup", "/api/auth/status", "/api/health"):
-            return {"username": "setup", "kind": "setup"}
+            return {"username": "setup", "kind": "setup", "role": "admin"}
         raise HTTPException(401, "Setup required")
     ident = _resolve_token(token)
     if not ident:
@@ -506,10 +545,95 @@ def require_auth(request: Request) -> Dict:
 
 
 def require_admin(request: Request) -> Dict:
+    """Web admin only (API keys can never manage users/auth)."""
     ident = require_auth(request)
     if ident["kind"] != "web":
-        raise HTTPException(403, "Admin login required (API keys cannot manage auth)")
+        raise HTTPException(403, "Web admin login required (API keys cannot manage users)")
+    if ident.get("role") != "admin":
+        raise HTTPException(403, "Admin role required")
     return ident
+
+
+def require_self_or_admin(ident: Dict, target: str) -> None:
+    if ident.get("role") != "admin" and target != ident.get("username"):
+        raise HTTPException(403, "You can only manage your own resources")
+
+
+# ── User management (admin) ─────────────────────────────────────────────
+def list_users() -> List[Dict]:
+    with _auth_lock:
+        data = _load_auth()
+        return [_public_user(u) for u in data.get("users", {}).values()]
+
+
+def create_user(username: str, password: str, role: str) -> Dict:
+    if role not in ROLES:
+        raise HTTPException(400, "Role must be 'admin' or 'user'")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{2,32}", username):
+        raise HTTPException(400, "Username must be 2-32 chars: letters, digits, . _ -")
+    if len(password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+    salt = secrets.token_bytes(16)
+    with _auth_lock:
+        data = _load_auth()
+        if username in data.get("users", {}):
+            raise HTTPException(409, "Username already exists")
+        data["users"][username] = {
+            "username": username,
+            "salt": salt.hex(),
+            "hash": _hash_password(password, salt),
+            "role": role,
+            "created_at": now_iso(),
+        }
+        _save_auth(data)
+    return _public_user(data["users"][username])
+
+
+def delete_user(username: str, actor: str) -> None:
+    with _auth_lock:
+        data = _load_auth()
+        user = data.get("users", {}).get(username)
+        if not user:
+            raise HTTPException(404, "User not found")
+        if user.get("role") == "admin" and _count_admins(data) <= 1:
+            raise HTTPException(400, "Cannot delete the last admin")
+        if username == actor:
+            raise HTTPException(400, "Cannot delete your own account (demote or ask another admin)")
+        del data["users"][username]
+        # remove their sessions and keys
+        data["sessions"] = {t: s for t, s in data.get("sessions", {}).items()
+                            if s.get("username") != username}
+        data["keys"] = {k: v for k, v in data.get("keys", {}).items()
+                        if v.get("owner") != username}
+        _save_auth(data)
+
+
+def reset_user_password(username: str, new_password: str) -> None:
+    if len(new_password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+    salt = secrets.token_bytes(16)
+    with _auth_lock:
+        data = _load_auth()
+        user = data.get("users", {}).get(username)
+        if not user:
+            raise HTTPException(404, "User not found")
+        user["salt"] = salt.hex()
+        user["hash"] = _hash_password(new_password, salt)
+        _save_auth(data)
+
+
+def change_user_role(username: str, role: str) -> None:
+    if role not in ROLES:
+        raise HTTPException(400, "Role must be 'admin' or 'user'")
+    with _auth_lock:
+        data = _load_auth()
+        user = data.get("users", {}).get(username)
+        if not user:
+            raise HTTPException(404, "User not found")
+        if user.get("role") == "admin" and role != "admin" and _count_admins(data) <= 1:
+            raise HTTPException(400, "Cannot demote the last admin")
+        user["role"] = role
+        _save_auth(data)
 
 
 # ── Alert engine ────────────────────────────────────────────────────────
@@ -1561,6 +1685,20 @@ class PasswordChange(BaseModel):
     new_password: str = ""
 
 
+class UserCreate(BaseModel):
+    username: str = ""
+    password: str = ""
+    role: str = "user"
+
+
+class UserPasswordReset(BaseModel):
+    new_password: str = ""
+
+
+class UserRoleChange(BaseModel):
+    role: str = "user"
+
+
 @app.post("/api/auth/setup")
 def auth_setup(body: Credentials):
     username = body.username.strip()
@@ -1587,64 +1725,114 @@ def auth_logout(request: Request):
     return {"ok": True}
 
 
-# ── Authenticated: auth management (web admin only) ─────────────────────
+# ── Authenticated: auth management ──────────────────────────────────────
 @app.get("/api/auth/me", dependencies=[Depends(require_auth)])
 async def auth_me(request: Request):
     return _resolve_token(_extract_token(request)) or {}
 
 
-@app.get("/api/auth/keys", dependencies=[Depends(require_admin)])
-async def keys_list():
+# ── User management (admin only) ────────────────────────────────────────
+@app.get("/api/users", dependencies=[Depends(require_admin)])
+async def users_list():
+    return list_users()
+
+
+@app.post("/api/users", dependencies=[Depends(require_admin)])
+def users_create(body: UserCreate):
+    return create_user(body.username.strip(), body.password, body.role)
+
+
+@app.delete("/api/users/{username}", dependencies=[Depends(require_admin)])
+def users_delete(username: str, request: Request):
+    ident = require_admin(request)
+    delete_user(username, ident["username"])
+    return {"ok": True}
+
+
+@app.post("/api/users/{username}/password", dependencies=[Depends(require_admin)])
+def users_reset_password(username: str, body: UserPasswordReset):
+    reset_user_password(username, body.new_password)
+    return {"ok": True}
+
+
+@app.post("/api/users/{username}/role", dependencies=[Depends(require_admin)])
+def users_change_role(username: str, body: UserRoleChange):
+    change_user_role(username, body.role)
+    return {"ok": True}
+
+
+# ── API keys (self or admin) ────────────────────────────────────────────
+@app.get("/api/auth/keys", dependencies=[Depends(require_auth)])
+async def keys_list(request: Request):
+    ident = require_auth(request)
     with _auth_lock:
         data = _load_auth()
+    keys = data.get("keys", {})
+    if ident.get("role") != "admin":
+        keys = {k: v for k, v in keys.items() if v.get("owner") == ident["username"]}
     return [
-        {"name": k.get("name"), "prefix": k.get("key", "")[:12] + "…",
+        {"name": k.get("name"), "owner": k.get("owner"),
+         "prefix": k.get("key", "")[:12] + "…",
          "created_at": k.get("created_at"), "last_used": k.get("last_used")}
-        for k in data.get("keys", {}).values()
+        for k in sorted(keys)
+        for k in [keys[k]]
     ]
 
 
-@app.post("/api/auth/keys", dependencies=[Depends(require_admin)])
-def keys_create(body: KeyCreate):
+@app.post("/api/auth/keys", dependencies=[Depends(require_auth)])
+def keys_create(body: KeyCreate, request: Request):
+    ident = require_auth(request)
     name = body.name.strip()[:32] or "api"
     if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
         raise HTTPException(400, "Invalid key name")
+    owner = ident["username"]
     key = "amk_" + secrets.token_urlsafe(24)
     with _auth_lock:
         data = _load_auth()
         if name in data.get("keys", {}):
             raise HTTPException(409, "Key name already exists")
         data.setdefault("keys", {})[name] = {
-            "name": name, "key": key, "created_at": now_iso(), "last_used": None,
+            "name": name, "owner": owner, "key": key,
+            "created_at": now_iso(), "last_used": None,
         }
         _save_auth(data)
-    return {"name": name, "key": key, "created_at": data["keys"][name]["created_at"]}
+    return {"name": name, "key": key, "owner": owner,
+            "created_at": data["keys"][name]["created_at"]}
 
 
-@app.delete("/api/auth/keys/{name}", dependencies=[Depends(require_admin)])
-def keys_delete(name: str):
+@app.delete("/api/auth/keys/{name}", dependencies=[Depends(require_auth)])
+def keys_delete(name: str, request: Request):
+    ident = require_auth(request)
     with _auth_lock:
         data = _load_auth()
-        if data.get("keys", {}).pop(name, None) is None:
+        key = data.get("keys", {}).get(name)
+        if key is None:
             raise HTTPException(404, "Key not found")
+        # only owner or admin can delete
+        if ident.get("role") != "admin" and key.get("owner") != ident["username"]:
+            raise HTTPException(403, "You can only delete your own keys")
+        del data["keys"][name]
         _save_auth(data)
     return {"ok": True}
 
 
-@app.post("/api/auth/password", dependencies=[Depends(require_admin)])
-def change_password(body: PasswordChange):
-    old = body.old_password
-    new = body.new_password
+# ── Own password (any authenticated web user) ───────────────────────────
+@app.post("/api/auth/password", dependencies=[Depends(require_auth)])
+def change_password(body: PasswordChange, request: Request):
+    ident = require_auth(request)
+    if ident["kind"] != "web":
+        raise HTTPException(403, "Use the web UI to change passwords")
+    old, new = body.old_password, body.new_password
     if len(new) < 8:
         raise HTTPException(400, "New password must be at least 8 characters")
     with _auth_lock:
         data = _load_auth()
-        admin = data.get("admin", {})
-        if not verify_password(old, admin):
+        user = data.get("users", {}).get(ident["username"], {})
+        if not verify_password(old, user):
             raise HTTPException(401, "Current password is incorrect")
         salt = secrets.token_bytes(16)
-        admin["salt"] = salt.hex()
-        admin["hash"] = _hash_password(new, salt)
+        user["salt"] = salt.hex()
+        user["hash"] = _hash_password(new, salt)
         _save_auth(data)
     return {"ok": True}
 

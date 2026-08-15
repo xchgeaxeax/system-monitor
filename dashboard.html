@@ -447,6 +447,7 @@ td.num,th.num{text-align:right}
       <div class="card-header"><h2>Account</h2></div>
       <div class="card-body open set-form">
         <div class="row"><span class="label">Signed in as</span><span class="value" id="set-user">-</span></div>
+        <div class="row"><span class="label">Role</span><span class="value"><span class="pill" id="set-role" style="display:none">-</span></span></div>
         <label>Current password</label><input id="pw-old" type="password">
         <label>New password (min 8 chars)</label><input id="pw-new" type="password">
         <label>Confirm new password</label><input id="pw-new2" type="password">
@@ -460,7 +461,7 @@ td.num,th.num{text-align:right}
     <div class="card">
       <div class="card-header"><h2>API Keys</h2></div>
       <div class="card-body open">
-        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Keys work with <code>Authorization: Bearer &lt;key&gt;</code> — for scripts, Grafana, Home Assistant etc. Keys can read metrics but cannot manage auth.</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Keys work with <code>Authorization: Bearer &lt;key&gt; — for scripts, Grafana, Home Assistant etc. Keys can read metrics but cannot manage users. You see your own keys; admins see all.</div>
         <div class="card-actions" style="margin-bottom:10px">
           <input id="key-name" placeholder="key name" style="font-size:12px;width:150px">
           <button class="mini-btn" id="key-create-btn">Create</button>
@@ -481,6 +482,25 @@ td.num,th.num{text-align:right}
       </div>
     </div>
   </div>
+
+  <!-- Users (admin only) -->
+  <div class="card" id="users-card" style="display:none;margin-top:12px">
+    <div class="card-header"><h2>Users</h2>
+      <div class="card-actions">
+        <input id="new-user" placeholder="username" style="font-size:12px;width:110px">
+        <input id="new-user-pass" type="password" placeholder="password" style="font-size:12px;width:120px">
+        <select id="new-user-role" style="font-size:12px"><option value="user">user</option><option value="admin">admin</option></select>
+        <button class="mini-btn" id="user-create-btn">Add user</button>
+        <div class="set-msg" id="user-msg"></div>
+      </div>
+    </div>
+    <div class="card-body open">
+      <div class="table-wrap" style="max-height:none"><table>
+        <thead><tr><th>User</th><th>Role</th><th>Created</th><th style="width:330px">Actions</th></tr></thead>
+        <tbody id="user-table"></tbody>
+      </table></div>
+    </div>
+  </div>
 </div>
 
 </div><!-- /content -->
@@ -496,6 +516,8 @@ td.num,th.num{text-align:right}
 const REFRESH_MS = 1500;
 const state = {
   token: localStorage.getItem('am_token') || '',
+  username: '',
+  role: 'user',
   theme: localStorage.getItem('am_theme') || 'auto',
   visible: true,
   tab: 'overview',
@@ -590,6 +612,7 @@ async function initAuth() {
   try {
     await api('/api/quick-stats');
     showApp();
+    fetchMe();
   } catch (e) { showAuth(); }
 }
 
@@ -600,8 +623,11 @@ $('login-form').addEventListener('submit', async e => {
     const r = await api('/api/auth/login', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({username: $('login-user').value, password: $('login-pass').value})});
     state.token = r.token;
+    state.username = r.username;
+    state.role = r.role || 'user';
     localStorage.setItem('am_token', state.token);
     showApp();
+    fetchMe();
   } catch (err) { $('login-err').textContent = err.message; }
 });
 
@@ -613,8 +639,11 @@ $('setup-form').addEventListener('submit', async e => {
     const r = await api('/api/auth/setup', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({username: $('setup-user').value, password: $('setup-pass').value})});
     state.token = r.token;
+    state.username = r.username;
+    state.role = r.role || 'admin';
     localStorage.setItem('am_token', state.token);
     showApp();
+    fetchMe();
   } catch (err) { $('setup-err').textContent = err.message; }
 });
 
@@ -886,7 +915,7 @@ async function fetchData() {
       .then(renderProcesses).catch(showError)
   );
   if (tab === 'logs') fetchLogs();
-  if (tab === 'settings') fetchKeys();
+  if (tab === 'settings') { fetchMe(); fetchKeys(); }
   await Promise.allSettled(jobs);
 }
 
@@ -1161,15 +1190,94 @@ $('show-virtual').addEventListener('change', fetchData);
 // ══════════════════════════════════════════════════════════════════════
 // Settings
 // ══════════════════════════════════════════════════════════════════════
+async function fetchMe() {
+  try {
+    const me = await api('/api/auth/me');
+    state.username = me.username || '';
+    state.role = me.role || 'user';
+    $('set-user').textContent = state.username;
+    const roleEl = $('set-role');
+    roleEl.style.display = 'inline-block';
+    roleEl.textContent = state.role === 'admin' ? 'Administrator' : 'User';
+    roleEl.className = 'pill ' + (state.role === 'admin' ? 'warn' : 'muted');
+    $('users-card').style.display = state.role === 'admin' ? 'block' : 'none';
+    if (state.role === 'admin' && state.tab === 'settings') fetchUsers();
+  } catch (e) { /* not logged in */ }
+}
+
+async function fetchUsers() {
+  const msg = $('user-msg');
+  try {
+    const users = await api('/api/users');
+    $('user-table').innerHTML = users.map(u => {
+      const me = u.username === state.username;
+      const rolePill = u.role === 'admin'
+        ? '<span class="pill warn">admin</span>' : '<span class="pill muted">user</span>';
+      let actions = '';
+      if (!me) {
+        actions += `<button class="mini-btn" onclick="userResetPw('${esc(u.username)}')">Reset pw</button>
+          <button class="mini-btn" onclick="userRole('${esc(u.username)}','${u.role === 'admin' ? 'user' : 'admin'}')">${u.role === 'admin' ? 'Demote' : 'Promote'}</button>
+          <button class="mini-btn danger" onclick="userDelete('${esc(u.username)}')">Delete</button>`;
+      } else {
+        actions += '<span style="color:var(--muted);font-size:12px">you</span>';
+      }
+      return `<tr><td>${esc(u.username)}</td><td>${rolePill}</td><td>${esc(u.created_at)}</td><td>${actions}</td></tr>`;
+    }).join('');
+  } catch (e) {
+    $('user-table').innerHTML = `<tr><td colspan="4" class="empty">Cannot load users (${esc(e.message)})</td></tr>`;
+  }
+}
+
+async function userCreate() {
+  const msg = $('user-msg');
+  msg.className = 'set-msg';
+  const username = $('new-user').value.trim();
+  const password = $('new-user-pass').value;
+  const role = $('new-user-role').value;
+  if (!username) { msg.textContent = 'Enter a username'; msg.classList.add('err'); return; }
+  if (password.length < 8) { msg.textContent = 'Password must be at least 8 chars'; msg.classList.add('err'); return; }
+  try {
+    await api('/api/users', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, password, role})});
+    msg.textContent = `User '${username}' created ✓`;
+    msg.classList.add('ok');
+    $('new-user').value = ''; $('new-user-pass').value = '';
+    fetchUsers();
+  } catch (e) { msg.textContent = e.message; msg.classList.add('err'); }
+}
+$('user-create-btn').addEventListener('click', userCreate);
+
+async function userDelete(username) {
+  if (!confirm(`Delete user '${username}'? Their sessions and API keys will be removed.`)) return;
+  try { await api('/api/users/' + encodeURIComponent(username), {method: 'DELETE'}); fetchUsers(); }
+  catch (e) { showError(e.message); }
+}
+async function userResetPw(username) {
+  const pw = prompt(`New password for '${username}' (min 8 chars):`);
+  if (pw === null) return;
+  if (pw.length < 8) { alert('Password must be at least 8 characters'); return; }
+  try { await api('/api/users/' + encodeURIComponent(username) + '/password', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({new_password: pw})});
+    alert('Password reset ✓');
+  } catch (e) { showError(e.message); }
+}
+async function userRole(username, role) {
+  try { await api('/api/users/' + encodeURIComponent(username) + '/role', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({role})});
+    fetchUsers();
+  } catch (e) { showError(e.message); }
+}
+
 async function fetchKeys() {
   try {
     const keys = await api('/api/auth/keys');
+    const isAdmin = state.role === 'admin';
     $('key-list').innerHTML = keys.length ? keys.map(k =>
       `<div class="key-row"><span class="name">${esc(k.name)}</span>
-       <span class="meta">${esc(k.prefix)} · created ${esc(k.created_at)}${k.last_used ? ' · used ' + esc(k.last_used) : ''}</span>
+       <span class="meta">${isAdmin && k.owner ? 'owner: ' + esc(k.owner) + ' · ' : ''}${esc(k.prefix)} · created ${esc(k.created_at)}${k.last_used ? ' · used ' + esc(k.last_used) : ''}</span>
        <button class="mini-btn danger" onclick="delKey('${esc(k.name)}')">Delete</button></div>`).join('')
       : '<div class="empty" style="padding:10px">No API keys yet.</div>';
-  } catch (e) { $('key-list').innerHTML = `<div class="empty">Only the web admin can manage keys.</div>`; }
+  } catch (e) { $('key-list').innerHTML = `<div class="empty">Cannot load keys (${esc(e.message)}).</div>`; }
 }
 async function delKey(name) {
   try { await api('/api/auth/keys/' + encodeURIComponent(name), {method: 'DELETE'}); fetchKeys(); }

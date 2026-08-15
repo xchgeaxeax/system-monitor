@@ -4,13 +4,24 @@
 
 ## 特性
 
-- 🔐 **认证**：首次打开面板创建管理员账号（用户名+密码）；Web UI 中可创建/删除 API Key 供工具访问
+- 🔐 **多用户认证**：首次打开面板创建管理员账号；管理员可创建/删除/重置密码/升降级普通用户；每个用户可管理自己的 API Key
 - 🔔 **告警面板**：磁盘/内存/温度/SMART/负载/VRAM 阈值告警，持久化历史；可确认（ack）、可删除（保留日志）、可清空
 - 🎨 **黑白主题**：跟随系统 `prefers-color-scheme` 自动切换，也可手动 深色/浅色/自动
 - 📈 **图表**：网络吞吐、CPU 频率、磁盘 I/O、GPU 利用率/VRAM 曲线（Canvas 自绘，gap 断线 + hover tooltip）
 - 🖥️ 覆盖 CPU / GPU(ROCm+Intel+sysfs) / 内存 / 存储+SMART / 网络 / 温度 / 进程 / 系统日志
 - ⚡ 性能：采样线程 1.5s 一次，SMART 60s 缓存，工具探测 5min 缓存，历史按时间窗口裁剪
-- 🔧 命令行管理：`monitor-cli.py`（重置密码、API Key、告警）
+- 🔧 命令行管理：`monitor-cli.py`（用户、密码、API Key、告警）
+
+## 角色与权限
+
+| 能力 | 管理员 (admin) | 普通用户 (user) |
+|------|:---:|:---:|
+| 查看所有监控数据 | ✅ | ✅ |
+| 管理告警（ack/删除/清空） | ✅ | ✅ |
+| 创建/删除/重置密码/升降级用户 | ✅ | ❌ |
+| 管理自己的 API Key | ✅ | ✅ |
+| 查看/删除所有 API Key | ✅ | 仅自己的 |
+| 修改自己的密码 | ✅ | ✅ |
 
 ## 快速部署
 
@@ -30,17 +41,23 @@ bash deploy.sh --root --port 8080
 ## 命令行管理（monitor-cli.py）
 
 ```bash
-# 查看状态
+# 查看状态（用户/Key/会话）
 python3 monitor-cli.py status
 
-# 重置管理员密码（需要 root）
-sudo python3 monitor-cli.py reset-password          # 交互式
-sudo python3 monitor-cli.py reset-password 'newpass'
+# 用户管理（需要 root）
+python3 monitor-cli.py user list
+python3 monitor-cli.py user create <user> <password> [admin|user]
+python3 monitor-cli.py user delete <user>
+python3 monitor-cli.py user reset-password <user> [new-password]
+python3 monitor-cli.py user role <user> <admin|user>
+
+# 重置第一个管理员密码（需要 root，兼容旧命令）
+sudo python3 monitor-cli.py reset-password [new-password]
 
 # API Key 管理
 python3 monitor-cli.py key list
-python3 monitor-cli.py key create grafana
-python3 monitor-cli.py key delete grafana
+python3 monitor-cli.py key create <name> [owner]
+python3 monitor-cli.py key delete <name>
 
 # 告警
 python3 monitor-cli.py alerts                        # 查看
@@ -99,8 +116,13 @@ Web 登录方式：`Authorization: Bearer <session token>`（登录后浏览器�
 | /api/alerts/active?rule_id= (DELETE) | 删除告警 | 需要 |
 | /api/alerts/history/{i} (DELETE) | 删除历史条目 | 需要 |
 | /api/alerts/clear-resolved (POST) | 清空已解决 | 需要 |
-| /api/auth/keys (GET/POST/DELETE) | API Key 管理 | 仅 Web 管理员 |
-| /api/auth/password (POST) | 修改密码 | 仅 Web 管理员 |
+| /api/users (GET) | 列出所有用户 | 仅管理员 |
+| /api/users (POST) | 创建用户 | 仅管理员 |
+| /api/users/{user} (DELETE) | 删除用户 | 仅管理员 |
+| /api/users/{user}/password (POST) | 重置用户密码 | 仅管理员 |
+| /api/users/{user}/role (POST) | 升降级用户 | 仅管理员 |
+| /api/auth/keys (GET/POST/DELETE) | API Key 管理 | 需要（普通用户仅自己的） |
+| /api/auth/password (POST) | 修改自己的密码 | 需要 |
 | /api/docs | API 文档 | 需要 |
 
 ## 告警规则
