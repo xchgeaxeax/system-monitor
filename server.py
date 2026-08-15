@@ -1650,8 +1650,11 @@ def change_password(body: PasswordChange):
 
 
 # ── Authenticated: metrics ──────────────────────────────────────────────
-@app.get("/", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
+@app.get("/", response_class=HTMLResponse)
 async def dashboard():
+    # Public shell: contains no sensitive data. The frontend JS checks
+    # /api/auth/status and shows the setup/login screen as needed; all
+    # real data lives behind require_auth.
     return DASHBOARD_HTML
 
 
