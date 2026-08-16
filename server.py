@@ -863,6 +863,100 @@ _gpu_cache_lock = threading.Lock()
 _smart_cache: Dict[str, Any] = {"data": None, "time": 0}
 _smart_cache_lock = threading.Lock()
 
+
+def _smart_attr_raw(attrs: Dict[str, Any], attr_id: int) -> Optional[int]:
+    """Raw value of a SMART attribute by numeric id (new 7.5 schema: table list)."""
+    for a in (attrs or {}).get("table", []):
+        if a.get("id") == attr_id:
+            rv = a.get("raw", {}).get("value")
+            return int(rv) if isinstance(rv, (int, float)) else None
+    return None
+
+
+def _smart_temperature(data: Dict[str, Any], attrs: Dict[str, Any]) -> Optional[float]:
+    """Current temperature in °C. Prefers the top-level field (7.5), then the
+    temperature attribute (194/190) whose raw string starts with the value."""
+    t = data.get("temperature")
+    if isinstance(t, dict) and t.get("current") is not None:
+        try:
+            return float(t["current"])
+        except (TypeError, ValueError):
+            pass
+    for a in (attrs or {}).get("table", []):
+        if a.get("id") in (194, 190) or "Temperature" in str(a.get("name", "")):
+            m = re.match(r"\s*(\d+)", str(a.get("raw", {}).get("string", "")))
+            if m:
+                return float(m.group(1))
+    return None
+
+
+def _parse_smartctl_json(out: str) -> Optional[Dict]:
+    """Parse smartctl -j output. Returns a normalized dict or None.
+
+    Handles both the legacy (<=7.1) schema (smart_attributes /
+    overall_health_self_assessment, attrs as a dict) and the 7.2+ schema
+    (ata_smart_attributes.table list / smart_status, model at top level).
+    Without this, smartctl 7.5 reports every SATA drive as N/A.
+    """
+    try:
+        d = json.loads(out)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(d, dict):
+        return None
+
+    # New (7.2+) schema
+    if isinstance(d.get("ata_smart_attributes"), dict):
+        attrs = d["ata_smart_attributes"]
+        status = d.get("smart_status") or {}
+        model = str(d.get("model_name") or d.get("device", {}).get("model_name") or "")[:40]
+        serial = str(d.get("serial_number") or d.get("device", {}).get("serial_number") or "")[:20]
+        poh = (d.get("power_on_time") or {}).get("hours")
+        try:
+            poh = int(poh) if poh is not None else 0
+        except (TypeError, ValueError):
+            poh = 0
+        lbs = d.get("logical_block_size") or 512
+        try:
+            lbs = int(lbs)
+        except (TypeError, ValueError):
+            lbs = 512
+        return {
+            "health_ok": bool(status.get("passed")),
+            "model": model,
+            "serial": serial,
+            "temperature": _smart_temperature(d, attrs),
+            "power_on_hours": poh,
+            "read_tb": round((_smart_attr_raw(attrs, 242) or 0) * lbs / 1024 ** 4, 2),
+            "write_tb": round((_smart_attr_raw(attrs, 241) or 0) * lbs / 1024 ** 4, 2),
+        }
+
+    # Legacy (<=7.1) schema
+    if isinstance(d.get("smart_attributes"), dict) and d.get("smart_attributes"):
+        attrs = d["smart_attributes"]
+        status = d.get("overall_health_self_assessment") or {}
+        model = str(d.get("device", {}).get("model_name") or d.get("model_name") or "")[:40]
+        serial = str(d.get("device", {}).get("serial_number") or d.get("serial_number") or "")[:20]
+        temp_val = next(
+            (a.get("value") for a in attrs.values()
+             if a.get("name") in ("Temperature_Celsius", "Current Temperature")), None)
+        poh_val = next(
+            (a.get("raw") for a in attrs.values() if a.get("name") == "Power_On_Hours"), None)
+        try:
+            poh = int(str(poh_val).split()[0]) if poh_val is not None else 0
+        except (ValueError, IndexError):
+            poh = 0
+        return {
+            "health_ok": bool(status.get("passed")),
+            "model": model,
+            "serial": serial,
+            "temperature": temp_val,
+            "power_on_hours": poh,
+            "read_tb": None,
+            "write_tb": None,
+        }
+    return None
+
 _tool_cache: Dict[str, Any] = {"rocm": None, "intel": None, "time": 0}
 _tool_cache_lock = threading.Lock()
 
@@ -1206,59 +1300,49 @@ def _collect_smart() -> Dict:
             "unsafe_shutdowns": smart_data.get("unsafe_shutdowns"),
         }
 
-    if is_root:
-        disks_out = run_cmd(["lsblk", "-dn", "-o", "NAME,TYPE,MODEL,SERIAL"], timeout=2)
-        if disks_out:
-            for line in disks_out.strip().split("\n"):
-                parts = line.split()
-                if len(parts) < 2 or parts[1] != "disk":
-                    continue
-                disk_name = parts[0]
-                if disk_name.startswith(("nvme", "nbd")):
-                    continue
-                smartctl_data = None
-                for args_suffix in (["-d", "sat", "-a", "-j"], ["-d", "ata", "-a", "-j"], ["-a", "-j"]):
-                    out = run_cmd([SMARTCTL] + args_suffix + [f"/dev/{disk_name}"], timeout=5)
-                    if out:
-                        try:
-                            data = json.loads(out)
-                            if data.get("smart_attributes"):
-                                smartctl_data = data
-                                break
-                        except json.JSONDecodeError:
-                            continue
-                model_name = " ".join(parts[2:]) if len(parts) > 2 else disk_name
-                serial_num = parts[-1] if len(parts) > 3 else ""
-                model_name = model_name[:40] if model_name != disk_name else ""
-                serial_num = serial_num[:20]
-                if smartctl_data:
-                    attrs = smartctl_data.get("smart_attributes", {})
-                    health = smartctl_data.get("overall_health_self_assessment", {})
-                    temp_val = next(
-                        (a["value"] for a in attrs.values()
-                         if a.get("name") in ("Temperature_Celsius", "Current Temperature")), None)
-                    poh_val = next(
-                        (a.get("raw") for a in attrs.values() if a.get("name") == "Power_On_Hours"), None)
-                    try:
-                        poh_val = int(str(poh_val).split()[0]) if poh_val is not None else 0
-                    except (ValueError, IndexError):
-                        poh_val = 0
-                    smart[disk_name] = {
-                        "model": model_name or (smartctl_data.get("device", {}).get("model_name", disk_name) or "")[:40],
-                        "serial": serial_num or (smartctl_data.get("device", {}).get("serial_number", "") or "")[:20],
-                        "health": "OK" if health.get("passed") else "CHECK",
-                        "temperature": temp_val,
-                        "power_on_hours": poh_val,
-                        "smart_available": True,
-                    }
-                else:
-                    smart[disk_name] = {
-                        "model": model_name,
-                        "serial": serial_num,
-                        "health": "N/A",
-                        "temperature": None,
-                        "smart_available": False,
-                    }
+    # SATA/ATA drives (via smartctl). Probe regardless of euid: root always
+    # works; non-root works when the user has CAP_SYS_RAWIO (e.g. in the
+    # `disk` group with a permissive kernel) and degrades to N/A otherwise.
+    disks_out = run_cmd(["lsblk", "-dn", "-o", "NAME,TYPE,MODEL,SERIAL"], timeout=2)
+    if disks_out:
+        for line in disks_out.strip().split("\n"):
+            parts = line.split()
+            if len(parts) < 2 or parts[1] != "disk":
+                continue
+            disk_name = parts[0]
+            if disk_name.startswith(("nvme", "nbd", "loop", "zram", "ram")):
+                continue
+            model_name = " ".join(parts[2:]) if len(parts) > 2 else disk_name
+            serial_num = parts[-1] if len(parts) > 3 else ""
+            model_name = model_name[:40] if model_name != disk_name else ""
+            serial_num = serial_num[:20]
+
+            parsed = None
+            for args_suffix in (["-d", "sat", "-a", "-j"], ["-d", "ata", "-a", "-j"], ["-a", "-j"]):
+                out = run_cmd([SMARTCTL] + args_suffix + [f"/dev/{disk_name}"], timeout=5)
+                if out:
+                    parsed = _parse_smartctl_json(out)
+                    if parsed:
+                        break
+            if parsed:
+                smart[disk_name] = {
+                    "model": parsed["model"] or model_name,
+                    "serial": parsed["serial"] or serial_num,
+                    "health": "OK" if parsed["health_ok"] else "CHECK",
+                    "temperature": parsed["temperature"],
+                    "power_on_hours": parsed["power_on_hours"],
+                    "read_tb": parsed["read_tb"],
+                    "write_tb": parsed["write_tb"],
+                    "smart_available": True,
+                }
+            else:
+                smart[disk_name] = {
+                    "model": model_name,
+                    "serial": serial_num,
+                    "health": "N/A",
+                    "temperature": None,
+                    "smart_available": False,
+                }
 
     with _smart_cache_lock:
         _smart_cache.clear()
