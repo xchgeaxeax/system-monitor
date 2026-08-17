@@ -942,15 +942,18 @@ def _parse_smartctl_json(out: str, disk_name: str = "") -> Optional[Dict]:
             lbs = 512
         raw_read = _smart_attr_raw(attrs, 242)
         raw_write = _smart_attr_raw(attrs, 241)
-        # Most drives report Total_LBAs_Read/Written in LBA units, but some
-        # vendors (notably SanDisk/WD) count in 1000-sector (512 KB) units.
+        # Most drives report Total_LBAs_Read/Written (241/242) in LBA units,
+        # but the unit is vendor-defined. SanDisk/WD drives (verified
+        # empirically on SD8SB8U1 / EXTREME K01U by reading known byte counts
+        # and measuring the counter delta) count in 32 MiB blocks.
         # Pick the multiplier by vendor, then sanity-check against /proc/
         # diskstats (since-boot counters can never exceed lifetime totals).
         model_l = (model or "").lower()
-        unit = 1000 * lbs if any(v in model_l for v in ("sandisk", "wd ", "wd-", "wd_", "western digital")) else lbs
+        sd_unit = 32 * 1024**2
+        unit = sd_unit if any(v in model_l for v in ("sandisk", "wd ", "wd-", "wd_", "western digital")) else lbs
         boot_read, boot_written = _diskstats_since_boot(disk_name)
         if raw_read is not None and raw_write is not None:
-            for cand in (unit, lbs, 1000 * lbs):
+            for cand in (unit, sd_unit, lbs):
                 ok = True
                 if boot_read is not None and cand * raw_read < boot_read:
                     ok = False
