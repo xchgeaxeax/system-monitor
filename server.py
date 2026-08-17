@@ -993,9 +993,13 @@ def _get_cpu_snapshot() -> Dict:
                 label = read_file_str(hwmon / f"temp{i}_label", "").strip()
                 crit = read_file_int(hwmon / f"temp{i}_crit", 0)
                 if 0 < v < 150000:
+                    # "Package id 0" (coretemp package temp) is too long for the grid
+                    lbl = label or f"Core {i - 1}"
+                    if lbl.startswith("Package"):
+                        lbl = "Package"
                     core_temps.append({
                         "id": f"{name}_{i}",
-                        "label": label or f"Core {i - 1}",
+                        "label": lbl,
                         "temp_c": round(v / 1000, 1),
                         "crit_c": round(crit / 1000, 1) if crit > 0 else 0,
                     })
@@ -1016,24 +1020,25 @@ def _get_cpu_snapshot() -> Dict:
     if avg_freq is not None:
         _cpu_freq_history.append((time.time(), round(avg_freq, 0)))
 
-    cpu_power_w = 0
+    cpu_power_w = None  # None = no RAPL, or RAPL not yet readable
     power_limit_w = 0
     rapl_path = SYSFS / "class/powercap/intel-rapl/intel-rapl:0"
     if rapl_path.exists():
         now = time.time()
-        energy_uj = read_file_int(rapl_path / "energy_uj", 0)
-        if energy_uj > 0 and _rapl_last_energy > 0 and _rapl_last_time:
-            dt = now - _rapl_last_time
-            if dt > 0.1:
-                max_energy = read_file_int(rapl_path / "max_energy_range_uj", 0)
-                if energy_uj < _rapl_last_energy and max_energy > 0:
-                    diff = (max_energy - _rapl_last_energy) + energy_uj
-                else:
-                    diff = energy_uj - _rapl_last_energy
-                if diff > 0:
-                    cpu_power_w = round(diff / dt / 1000000, 1)
-        _rapl_last_energy = energy_uj
-        _rapl_last_time = now
+        energy_uj = read_file_int(rapl_path / "energy_uj", -1)
+        if energy_uj >= 0:
+            if _rapl_last_energy > 0 and _rapl_last_time:
+                dt = now - _rapl_last_time
+                if dt > 0.1:
+                    max_energy = read_file_int(rapl_path / "max_energy_range_uj", 0)
+                    if energy_uj < _rapl_last_energy and max_energy > 0:
+                        diff = (max_energy - _rapl_last_energy) + energy_uj
+                    else:
+                        diff = energy_uj - _rapl_last_energy
+                    # Valid baseline -> report the reading (may legitimately be 0.0)
+                    cpu_power_w = round(max(diff, 0) / dt / 1000000, 1)
+            _rapl_last_energy = energy_uj
+            _rapl_last_time = now
         limit_uw = read_file_int(rapl_path / "constraint_0_power_limit_uw", 0)
         if limit_uw > 0:
             power_limit_w = round(limit_uw / 1000000, 0)
@@ -1288,8 +1293,8 @@ def _collect_smart() -> Dict:
             "serial": serial,
             "firmware": fw_rev,
             "temperature": temp_c,
-            "read_tb": round(dur * 512 * 1024 / 1024**4, 2),
-            "write_tb": round(duw * 512 * 1024 / 1024**4, 2),
+            "read_tb": round(dur * 1000 / 1024**4, 2),
+            "write_tb": round(duw * 1000 / 1024**4, 2),
             "power_on_hours": smart_data.get("power_on_hours", 0),
             "power_cycles": smart_data.get("power_cycles", 0),
             "health": "OK" if smart_data.get("critical_warning", 0) == 0 else "WARNING",

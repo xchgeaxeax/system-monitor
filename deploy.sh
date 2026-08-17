@@ -150,9 +150,25 @@ if [ "$MODE" = "user" ]; then
         -e "s/AI_MONITOR_HOST=.*/AI_MONITOR_HOST=$HOST/" \
         "$INSTALL_DIR/system-monitor-user.service" > ~/.config/systemd/user/system-monitor.service
 
-    # Reload and enable
+    # Verify the unit file landed on disk and is non-empty.
+    if [ ! -s ~/.config/systemd/user/system-monitor.service ]; then
+        error "Failed to write ~/.config/systemd/user/system-monitor.service (missing or empty)."
+    fi
+
+    # Reload and enable (retry once to avoid the daemon-reload settle race).
     systemctl --user daemon-reload
-    systemctl --user enable system-monitor
+    if ! systemctl --user enable system-monitor 2>/dev/null; then
+        sleep 1
+        systemctl --user daemon-reload
+        if ! systemctl --user enable system-monitor 2>/dev/null; then
+            echo ""
+            error "Could not enable user unit system-monitor.service. Diagnostics:
+  unit file:      $(ls -l ~/.config/systemd/user/system-monitor.service 2>&1)
+  try manually:   systemctl --user daemon-reload && systemctl --user enable --now system-monitor
+  journal:        journalctl --user -u system-monitor -n 30
+  (loginctl enable-linger $(whoami) keeps it running when no session is open)"
+        fi
+    fi
     systemctl --user start system-monitor
 
     # Check status
@@ -181,6 +197,19 @@ else
         -e "s/AI_MONITOR_HOST=.*/AI_MONITOR_HOST=$HOST/" \
         "$INSTALL_DIR/system-monitor-root.service" > /etc/systemd/system/system-monitor.service
 
+    # Verify the unit file actually landed on disk and is non-empty.
+    if [ ! -s /etc/systemd/system/system-monitor.service ]; then
+        error "Failed to write /etc/systemd/system/system-monitor.service (missing or empty). Check disk space and permissions."
+    fi
+    # Drop a stale symlink/mask that would shadow the real unit.
+    if [ -L /etc/systemd/system/system-monitor.service ]; then
+        warn "system-monitor.service was a symlink; replacing with a real file."
+        rm -f /etc/systemd/system/system-monitor.service
+        sed -e "s/AI_MONITOR_PORT=.*/AI_MONITOR_PORT=$PORT/" \
+            -e "s/AI_MONITOR_HOST=.*/AI_MONITOR_HOST=$HOST/" \
+            "$INSTALL_DIR/system-monitor-root.service" > /etc/systemd/system/system-monitor.service
+    fi
+
     # Set CAP_PERFMON for intel_gpu_top if installed
     if command -v intel_gpu_top &>/dev/null; then
         INTEL_GPU_TOP_PATH=$(which intel_gpu_top)
@@ -197,9 +226,23 @@ else
         fi
     done
 
-    # Reload and enable
+    # Reload and enable. daemon-reload can take a moment to settle, so retry
+    # enable once if the unit is not yet visible (avoids the spurious
+    # "Unit ... does not exist" race on some systemd versions).
     systemctl daemon-reload
-    systemctl enable system-monitor
+    if ! systemctl enable system-monitor 2>/dev/null; then
+        sleep 1
+        systemctl daemon-reload
+        if ! systemctl enable system-monitor 2>/dev/null; then
+            echo ""
+            error "Could not enable system-monitor.service. Diagnostics:
+  unit file:      $(ls -l /etc/systemd/system/system-monitor.service 2>&1)
+  masked?         $(systemctl is-enabled system-monitor 2>&1)
+  known to systemd: $(systemctl cat system-monitor 2>&1 | head -1)
+  try manually:   sudo systemctl daemon-reload && sudo systemctl enable --now system-monitor
+  journal:        sudo journalctl -u system-monitor -n 30"
+        fi
+    fi
     systemctl start system-monitor
 
     # Check status

@@ -77,6 +77,7 @@ input:focus,select:focus{border-color:var(--accent)}
 
 /* ── Summary grid ── */
 .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px;margin-bottom:12px}
+.summary-grid>*{min-width:0}
 .stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 14px;box-shadow:var(--shadow)}
 .stat h3{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-bottom:4px;font-weight:600}
 .stat .value{font-size:28px;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums}
@@ -141,6 +142,17 @@ td.num,th.num{text-align:right}
 .graph-legend .sw{width:10px;height:3px;border-radius:2px}
 .graph-time{font-size:10px;color:var(--muted);display:flex;justify-content:space-between;margin-top:2px}
 .tooltip{position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:7px 10px;font-size:12px;pointer-events:none;z-index:999;display:none;box-shadow:0 4px 14px rgba(0,0,0,.25);font-variant-numeric:tabular-nums}
+/* ── Modal (replaces native prompt/confirm) ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);display:none;align-items:center;justify-content:center;z-index:1000}
+.modal-overlay.show{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px 22px;width:min(400px,92vw);box-shadow:0 12px 40px rgba(0,0,0,.4)}
+.modal h3{font-size:15px;margin-bottom:8px}
+.modal .modal-body{font-size:13px;color:var(--dim);margin-bottom:14px;line-height:1.5}
+.modal .modal-body code{background:var(--card2);padding:1px 5px;border-radius:4px;color:var(--text)}
+.modal input{width:100%;margin-bottom:10px}
+.modal .modal-err{color:var(--red);font-size:12px;min-height:16px;margin-bottom:8px}
+.modal .modal-actions{display:flex;gap:8px;justify-content:flex-end}
+.modal .modal-actions .mini-btn{padding:7px 14px;font-size:13px}
 .tooltip .tt-time{color:var(--muted);font-size:11px;margin-bottom:3px}
 .tooltip .tt-row{display:flex;align-items:center;gap:6px}
 .tooltip .tt-row .sw{width:8px;height:3px;border-radius:2px}
@@ -187,7 +199,8 @@ td.num,th.num{text-align:right}
 
 /* ── Responsive ── */
 @media(max-width:820px){
-  .summary-grid{grid-template-columns:repeat(2,1fr)}
+  .summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .stat .value{font-size:22px}
   .topbar .right span.hide-m{display:none}
   .tabs{top:46px}
 }
@@ -508,6 +521,20 @@ td.num,th.num{text-align:right}
 
 <div class="tooltip" id="tooltip"></div>
 
+<!-- Reusable modal (confirm / prompt) -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal" role="dialog" aria-modal="true">
+    <h3 id="modal-title"></h3>
+    <div class="modal-body" id="modal-body"></div>
+    <input id="modal-input" type="text" style="display:none" autocomplete="off">
+    <div class="modal-err" id="modal-err"></div>
+    <div class="modal-actions">
+      <button class="mini-btn" id="modal-cancel">Cancel</button>
+      <button class="mini-btn" id="modal-ok">OK</button>
+    </div>
+  </div>
+</div>
+
 <script>
 "use strict";
 // ══════════════════════════════════════════════════════════════════════
@@ -546,7 +573,7 @@ async function api(path, opts = {}) {
   if (r.status === 401) { showAuth(); throw new Error('unauthorized'); }
   if (!r.ok) {
     let msg = r.status;
-    try { const j = await r.json(); msg = j.error || msg; } catch(e) {}
+    try { const j = await r.json(); msg = j.detail || j.error || msg; } catch(e) {}
     throw new Error(msg);
   }
   return r.json();
@@ -559,6 +586,48 @@ function showError(msg) {
   b.style.display = 'block';
   clearTimeout(showError._t);
   showError._t = setTimeout(() => { b.style.display = 'none'; state.errCount = 0; }, 6000);
+}
+
+// ── Modal (replaces native prompt/confirm — styled, non-blocking, testable) ──
+function showModal({title, body, input = false, placeholder = '', okLabel = 'OK', okDanger = false, validate = null}) {
+  return new Promise(resolve => {
+    const ov = $('modal-overlay');
+    $('modal-title').textContent = title;
+    $('modal-body').innerHTML = body;
+    $('modal-err').textContent = '';
+    const inp = $('modal-input');
+    inp.style.display = input ? 'block' : 'none';
+    inp.type = placeholder === 'password' ? 'password' : 'text';
+    inp.value = '';
+    inp.placeholder = placeholder === 'password' ? 'Enter new password' : placeholder;
+    const ok = $('modal-ok');
+    ok.textContent = okLabel;
+    ok.className = 'mini-btn' + (okDanger ? ' danger' : '');
+    const close = (val) => {
+      ov.classList.remove('show');
+      ok.onclick = null;
+      $('modal-cancel').onclick = null;
+      inp.onkeydown = null;
+      ov.onkeydown = null;
+      resolve(val);
+    };
+    const doOk = () => {
+      if (validate) {
+        const err = validate(inp.value);
+        if (err) { $('modal-err').textContent = err; return; }
+      }
+      close(input ? inp.value : true);
+    };
+    ok.onclick = doOk;
+    $('modal-cancel').onclick = () => close(null);
+    ov.onclick = e => { if (e.target === ov) close(null); };
+    // Escape cancels regardless of which element has focus
+    ov.onkeydown = e => { if (e.key === 'Escape') { e.stopPropagation(); close(null); } };
+    inp.onkeydown = e => { if (e.key === 'Enter') doOk(); };
+    ov.classList.add('show');
+    if (input) setTimeout(() => inp.focus(), 30);
+    else ok.focus();
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -1021,7 +1090,7 @@ function renderCpu(c) {
   $('cpu-cores').textContent = `${c.cores} cores / ${c.threads} threads`;
   $('cpu-freq').textContent = `${(c.freq_current/1000).toFixed(2)} GHz (${(c.freq_min/1000).toFixed(1)}–${(c.freq_max/1000).toFixed(1)} GHz)`;
   $('cpu-load').textContent = c.load_avg.join('  ');
-  $('cpu-power').textContent = c.power_w ? `${c.power_w} W${c.power_limit_w ? ' / limit ' + c.power_limit_w + ' W' : ''}` : 'N/A';
+  $('cpu-power').textContent = c.power_w != null ? `${c.power_w} W${c.power_limit_w ? ' / limit ' + c.power_limit_w + ' W' : ''}` : (c.power_limit_w ? `limit ${c.power_limit_w} W` : 'N/A');
   $('cpu-cache-info').innerHTML = Object.entries(c.cache).map(([k, v]) =>
     `<div class="row"><span class="label">${esc(k)}</span><span class="value">${esc(v)}</span></div>`).join('');
   setBar('cpu-bar', c.usage_percent);
@@ -1071,13 +1140,27 @@ function renderGpu(g) {
     }
     return `<div class="card gpu-card"><div class="card-header"><h2>${esc(gpu.name)}</h2><span class="badge">${esc(gpu.bus_id || '')}</span></div><div class="card-body open">${body}</div></div>`;
   }).join('');
-  // init new canvases (keyed by GPU id so history mapping stays correct)
+  // init new canvases (keyed by GPU id so history mapping stays correct).
+  // renderGpu replaces the card HTML every refresh, which orphans the canvas
+  // the graph object points at -> rebind it to the fresh element (keep data).
   all.forEach(gpu => {
-    if (gpu.id && !graphs['gpu-graph-' + gpu.id]) {
+    if (!gpu.id) return;
+    const canvas = $('gpu-graph-' + gpu.id);
+    if (!canvas) return;
+    if (!graphs['gpu-graph-' + gpu.id]) {
       makeGraph('gpu-graph-' + gpu.id, [
         {label: 'Util %', color: cssVar('--accent'), fill: true, yDefault: 100},
         {label: 'VRAM %', color: cssVar('--purple')},
       ]);
+    } else {
+      graphs['gpu-graph-' + gpu.id].canvas = canvas;
+      canvas.addEventListener('mousemove', e => onGraphHover('gpu-graph-' + gpu.id, e));
+      canvas.addEventListener('mouseleave', () => {
+        const g = graphs['gpu-graph-' + gpu.id];
+        if (g) { g.hover = -1; drawGraph('gpu-graph-' + gpu.id); }
+        $('tooltip').style.display = 'none';
+      });
+      new ResizeObserver(() => drawGraph('gpu-graph-' + gpu.id)).observe(canvas);
       drawGraph('gpu-graph-' + gpu.id);
     }
   });
@@ -1248,20 +1331,36 @@ async function userCreate() {
 $('user-create-btn').addEventListener('click', userCreate);
 
 async function userDelete(username) {
-  if (!confirm(`Delete user '${username}'? Their sessions and API keys will be removed.`)) return;
+  const ok = await showModal({
+    title: 'Delete user',
+    body: `Delete <code>${esc(username)}</code>? Their sessions and API keys will be removed.`,
+    okLabel: 'Delete', okDanger: true,
+  });
+  if (!ok) return;
   try { await api('/api/users/' + encodeURIComponent(username), {method: 'DELETE'}); fetchUsers(); }
   catch (e) { showError(e.message); }
 }
 async function userResetPw(username) {
-  const pw = prompt(`New password for '${username}' (min 8 chars):`);
+  const pw = await showModal({
+    title: 'Reset password',
+    body: `New password for <code>${esc(username)}</code> (min 8 chars):`,
+    input: true, placeholder: 'password', okLabel: 'Reset',
+    validate: v => (v && v.length >= 8) ? '' : 'Password must be at least 8 characters',
+  });
   if (pw === null) return;
-  if (pw.length < 8) { alert('Password must be at least 8 characters'); return; }
   try { await api('/api/users/' + encodeURIComponent(username) + '/password', {method: 'POST',
     headers: {'Content-Type': 'application/json'}, body: JSON.stringify({new_password: pw})});
-    alert('Password reset ✓');
+    $('user-msg').textContent = 'Password reset ✓'; $('user-msg').className = 'set-msg ok';
   } catch (e) { showError(e.message); }
 }
 async function userRole(username, role) {
+  const verb = role === 'admin' ? 'Promote' : 'Demote';
+  const ok = await showModal({
+    title: verb + ' user',
+    body: `${verb} <code>${esc(username)}</code> to <code>${role}</code>?`,
+    okLabel: verb,
+  });
+  if (!ok) return;
   try { await api('/api/users/' + encodeURIComponent(username) + '/role', {method: 'POST',
     headers: {'Content-Type': 'application/json'}, body: JSON.stringify({role})});
     fetchUsers();
@@ -1280,6 +1379,12 @@ async function fetchKeys() {
   } catch (e) { $('key-list').innerHTML = `<div class="empty">Cannot load keys (${esc(e.message)}).</div>`; }
 }
 async function delKey(name) {
+  const ok = await showModal({
+    title: 'Delete API key',
+    body: `Delete key <code>${esc(name)}</code>? Anything using it will stop working.`,
+    okLabel: 'Delete', okDanger: true,
+  });
+  if (!ok) return;
   try { await api('/api/auth/keys/' + encodeURIComponent(name), {method: 'DELETE'}); fetchKeys(); }
   catch (e) { showError(e.message); }
 }
