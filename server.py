@@ -890,7 +890,26 @@ def _smart_temperature(data: Dict[str, Any], attrs: Dict[str, Any]) -> Optional[
     return None
 
 
-def _parse_smartctl_json(out: str) -> Optional[Dict]:
+def _diskstats_since_boot(dev_name: str):
+    """(read_bytes, written_bytes) since boot from /proc/diskstats.
+
+    Returns (None, None) when unavailable. Sector size in diskstats is
+    always 512 bytes.
+    """
+    if not dev_name:
+        return None, None
+    try:
+        with open("/proc/diskstats") as fh:
+            for line in fh:
+                f = line.split()
+                if len(f) > 9 and f[2] == dev_name:
+                    return int(f[5]) * 512, int(f[9]) * 512
+    except (OSError, ValueError):
+        pass
+    return None, None
+
+
+def _parse_smartctl_json(out: str, disk_name: str = "") -> Optional[Dict]:
     """Parse smartctl -j output. Returns a normalized dict or None.
 
     Handles both the legacy (<=7.1) schema (smart_attributes /
@@ -921,14 +940,35 @@ def _parse_smartctl_json(out: str) -> Optional[Dict]:
             lbs = int(lbs)
         except (TypeError, ValueError):
             lbs = 512
+        raw_read = _smart_attr_raw(attrs, 242)
+        raw_write = _smart_attr_raw(attrs, 241)
+        # Most drives report Total_LBAs_Read/Written in LBA units, but some
+        # vendors (notably SanDisk/WD) count in 1000-sector (512 KB) units.
+        # Pick the multiplier by vendor, then sanity-check against /proc/
+        # diskstats (since-boot counters can never exceed lifetime totals).
+        model_l = (model or "").lower()
+        unit = 1000 * lbs if any(v in model_l for v in ("sandisk", "wd ", "wd-", "wd_", "western digital")) else lbs
+        boot_read, boot_written = _diskstats_since_boot(disk_name)
+        if raw_read is not None and raw_write is not None:
+            for cand in (unit, lbs, 1000 * lbs):
+                ok = True
+                if boot_read is not None and cand * raw_read < boot_read:
+                    ok = False
+                if boot_written is not None and cand * raw_write < boot_written:
+                    ok = False
+                if ok:
+                    unit = cand
+                    break
+        read_tb = round(raw_read * unit / 1024**4, 3) if raw_read is not None else None
+        write_tb = round(raw_write * unit / 1024**4, 3) if raw_write is not None else None
         return {
             "health_ok": bool(status.get("passed")),
             "model": model,
             "serial": serial,
             "temperature": _smart_temperature(d, attrs),
             "power_on_hours": poh,
-            "read_tb": round((_smart_attr_raw(attrs, 242) or 0) * lbs / 1024 ** 4, 2),
-            "write_tb": round((_smart_attr_raw(attrs, 241) or 0) * lbs / 1024 ** 4, 2),
+            "read_tb": read_tb,
+            "write_tb": write_tb,
         }
 
     # Legacy (<=7.1) schema
@@ -1348,7 +1388,7 @@ def _collect_smart() -> Dict:
             for args_suffix in (["-d", "sat", "-a", "-j"], ["-d", "ata", "-a", "-j"], ["-a", "-j"]):
                 out = run_cmd([SMARTCTL] + args_suffix + [f"/dev/{disk_name}"], timeout=5)
                 if out:
-                    parsed = _parse_smartctl_json(out)
+                    parsed = _parse_smartctl_json(out, disk_name)
                     if parsed:
                         break
             if parsed:
