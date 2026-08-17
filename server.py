@@ -1264,6 +1264,10 @@ def _collect_smart() -> Dict:
                         continue
                     key, _, val = line.partition(":")
                     key = key.strip().lower().replace(" ", "_")
+                    # Some vendors append a unit suffix to the label,
+                    # e.g. "Data Units Read (1000 bytes)" -> drop it so the
+                    # key still matches "data_units_read".
+                    key = re.sub(r"\(.*\)$", "", key).rstrip("_")
                     val = val.strip()
                     num_match = re.match(r"(\d+)", val)
                     num_val = int(num_match.group(1)) if num_match else None
@@ -1275,6 +1279,16 @@ def _collect_smart() -> Dict:
                                  "host_read_commands", "host_write_commands", "power_on_hours", "power_cycles",
                                  "unsafe_shutdowns", "media_errors"):
                         smart_data[key] = num_val
+                        # Many vendors (e.g. SM2269XT, Hynix) print the
+                        # already-converted value in parentheses:
+                        #   Data Units Read : 34239390 (17.53 TB)
+                        # The raw count's unit is vendor-defined (here
+                        # 512000 bytes), so a fixed multiplier is wrong;
+                        # prefer the vendor's own TB figure.
+                        if key in ("data_units_read", "data_units_written"):
+                            tb_match = re.search(r"\(\s*([\d.]+)\s*TB\s*\)", val, re.I)
+                            if tb_match:
+                                smart_data[key + "_tb"] = float(tb_match.group(1))
 
         if not smart_data:
             smart_log = dev / "smart_information_log"
@@ -1288,13 +1302,21 @@ def _collect_smart() -> Dict:
 
         dur = smart_data.get("data_units_read", 0) or 0
         duw = smart_data.get("data_units_written", 0) or 0
+        # Prefer the vendor's own TB figure (see parser above); otherwise fall
+        # back to the NVMe spec unit size of 1000 bytes for standard drives.
+        read_tb = smart_data.get("data_units_read_tb")
+        if read_tb is None:
+            read_tb = dur * 1000 / 1024**4
+        write_tb = smart_data.get("data_units_written_tb")
+        if write_tb is None:
+            write_tb = duw * 1000 / 1024**4
         smart[ctrl_name] = {
             "model": model,
             "serial": serial,
             "firmware": fw_rev,
             "temperature": temp_c,
-            "read_tb": round(dur * 1000 / 1024**4, 2),
-            "write_tb": round(duw * 1000 / 1024**4, 2),
+            "read_tb": round(read_tb, 2),
+            "write_tb": round(write_tb, 2),
             "power_on_hours": smart_data.get("power_on_hours", 0),
             "power_cycles": smart_data.get("power_cycles", 0),
             "health": "OK" if smart_data.get("critical_warning", 0) == 0 else "WARNING",
