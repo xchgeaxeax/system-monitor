@@ -39,7 +39,7 @@ A lightweight performance monitor for AI / home servers. Key design:
 - 🎨 **黑白双主题** — 跟随系统 `prefers-color-scheme` 自动切换，也可手动 深色/浅色/自动
 - 📈 **实时图表** — 网络吞吐、CPU 频率、磁盘 I/O、GPU 利用率/VRAM 曲线（Canvas 自绘，断线 + hover 提示）
 - 🖥️ **全覆盖** — CPU / GPU(ROCm+Intel+sysfs) / 内存 / 存储+SMART / 网络 / 温度 / 进程 / 系统日志
-- ⚡ **高性能** — 采样线程 + 多级缓存（SMART 60s、工具探测 5min），历史按时间窗口裁剪
+- ⚡ **高性能** — 采样线程 + 多级缓存（SMART 60s、工具探测 5min），历史按时间窗口裁剪；系统日志默认不轮询（手动刷新或勾选 auto 每 5s 刷新），避免频繁 spawn journalctl
 - 🪶 **自我监控** — 概览页显示本工具自身 CPU / 内存 / 线程数（实测空闲约 1% CPU、~66 MB 内存）；无对应 GPU 时自动跳过厂商工具
 - 🔧 **命令行管理** — `monitor-cli.py`：用户、密码、API Key、告警
 
@@ -48,7 +48,7 @@ A lightweight performance monitor for AI / home servers. Key design:
 - 🎨 **Dark & light theme** — follows `prefers-color-scheme`, or manual dark/light/auto
 - 📈 **Live charts** — network throughput, CPU frequency, disk I/O, GPU utilization/VRAM (custom Canvas, gap-aware + hover tooltip)
 - 🖥️ **Full coverage** — CPU / GPU (ROCm+Intel+sysfs) / memory / storage+SMART / network / temps / processes / system logs
-- ⚡ **High performance** — sampler thread + multi-level caching (SMART 60s, tool probe 5min), time-windowed history
+- ⚡ **High performance** — sampler thread + multi-level caching (SMART 60s, tool probe 5min), time-windowed history; system logs don't poll by default (manual refresh or opt-in "auto" every 5s) to avoid spawning journalctl constantly
 - 🪶 **Self-monitoring** — the overview shows the tool's own CPU / RSS / threads (measured ~1% CPU, ~66 MB RSS idle); GPU sampler skips vendor tools when no such GPU is present
 - 🔧 **CLI management** — `monitor-cli.py`: users, passwords, API keys, alerts
 

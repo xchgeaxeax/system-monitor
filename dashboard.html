@@ -447,6 +447,7 @@ td.num,th.num{text-align:right}
         <select id="log-unit" style="font-size:12px;max-width:170px"><option value="">All units</option></select>
         <input id="log-search" placeholder="Grep…" style="width:130px;font-size:12px">
         <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="log-noisy" style="width:auto"> noisy</label>
+        <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px;cursor:pointer" title="Auto-refresh logs every 5s (off by default to save CPU)"><input type="checkbox" id="log-auto" style="width:auto"> auto</label>
         <button class="mini-btn" id="log-refresh">↻</button>
       </div>
     </div>
@@ -552,6 +553,8 @@ const state = {
   procSort: 'cpu',
   procSearch: '',
   logTimer: null,
+  _logLoaded: false,
+  _logLast: 0,
   errCount: 0,
 };
 let refreshTimer = null;
@@ -731,6 +734,7 @@ function switchTab(tab) {
   state.tab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + tab));
+  if (tab === 'logs') state._logLast = 0;  // force an initial load on tab entry
   fetchData();
 }
 document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => switchTab(t.dataset.tab)));
@@ -985,7 +989,19 @@ async function fetchData() {
     api(`/api/processes?sort_by=${state.procSort}${state.procSearch ? '&search=' + encodeURIComponent(state.procSearch) : ''}`)
       .then(renderProcesses).catch(showError)
   );
-  if (tab === 'logs') fetchLogs();
+  if (tab === 'logs') {
+    // Logs spawn a journalctl subprocess server-side, so don't poll every
+    // 1.5s by default. Always load once per tab visit; only keep refreshing
+    // when the user opts in via "auto" (throttled to 5s).
+    const now = Date.now();
+    if (!state._logLoaded || (now - (state._logLast || 0) >= 5000)) {
+      if ($('log-auto').checked || !state._logLoaded) {
+        state._logLast = now;
+        state._logLoaded = true;
+        fetchLogs();
+      }
+    }
+  }
   if (tab === 'settings') { fetchMe(); fetchKeys(); }
   await Promise.allSettled(jobs);
 }
