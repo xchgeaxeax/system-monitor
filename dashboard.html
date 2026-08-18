@@ -288,6 +288,7 @@ td.num,th.num{text-align:right}
     <div class="stat click" data-goto="network"><h3>Network</h3><div class="value" id="ov-net-rx">-</div><div class="sub" id="ov-net-tx">-</div></div>
     <div class="stat click" data-goto="storage"><h3>Disks</h3><div class="value" id="ov-disk-pct">-</div><div class="sub" id="ov-disk-sub">-</div></div>
     <div class="stat"><h3>System</h3><div class="value" id="ov-uptime">-</div><div class="sub" id="ov-load">-</div></div>
+    <div class="stat" title="This monitor's own resource usage"><h3>Monitor</h3><div class="value" id="ov-mon-rss">-</div><div class="sub" id="ov-mon-sub">-</div></div>
   </div>
   <div class="card">
     <div class="card-header"><h2>Network Activity</h2><span class="badge" id="net-badge">-</span></div>
@@ -937,6 +938,7 @@ async function fetchData() {
     api('/api/summary').then(renderSummary).catch(e => {}),
     api('/api/health').then(renderHealth).catch(e => {}),
     api('/api/alerts').then(renderAlerts).catch(e => {}),
+    api('/api/monitor').then(renderMonitor).catch(e => {}),
   ];
   if (tab === 'overview') jobs.push(
     api('/api/net-history').then(d => {
@@ -1030,6 +1032,14 @@ function renderHealth(h) {
   $('version-badge').textContent = 'v' + h.version;
   const dot = $('status-dot');
   dot.className = 'status-dot' + (h.status === 'warning' ? ' warn' : '');
+}
+
+function renderMonitor(m) {
+  const rss = m.rss_mb != null ? m.rss_mb.toFixed(0) + ' MB' : '-';
+  const cpu = m.cpu_percent != null ? m.cpu_percent + '%' : '—';
+  const thr = m.threads != null ? ' · ' + m.threads + ' threads' : '';
+  $('ov-mon-rss').textContent = rss;
+  $('ov-mon-sub').textContent = 'CPU ' + cpu + thr;
 }
 
 function renderAlerts(a) {

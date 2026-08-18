@@ -40,6 +40,7 @@ A lightweight performance monitor for AI / home servers. Key design:
 - 📈 **实时图表** — 网络吞吐、CPU 频率、磁盘 I/O、GPU 利用率/VRAM 曲线（Canvas 自绘，断线 + hover 提示）
 - 🖥️ **全覆盖** — CPU / GPU(ROCm+Intel+sysfs) / 内存 / 存储+SMART / 网络 / 温度 / 进程 / 系统日志
 - ⚡ **高性能** — 采样线程 + 多级缓存（SMART 60s、工具探测 5min），历史按时间窗口裁剪
+- 🪶 **自我监控** — 概览页显示本工具自身 CPU / 内存 / 线程数（实测空闲约 1% CPU、~66 MB 内存）；无对应 GPU 时自动跳过厂商工具
 - 🔧 **命令行管理** — `monitor-cli.py`：用户、密码、API Key、告警
 
 - 🔐 **Multi-user auth** — first-run admin setup; admins create/delete/reset/demote regular users; each user manages their own API keys
@@ -48,6 +49,7 @@ A lightweight performance monitor for AI / home servers. Key design:
 - 📈 **Live charts** — network throughput, CPU frequency, disk I/O, GPU utilization/VRAM (custom Canvas, gap-aware + hover tooltip)
 - 🖥️ **Full coverage** — CPU / GPU (ROCm+Intel+sysfs) / memory / storage+SMART / network / temps / processes / system logs
 - ⚡ **High performance** — sampler thread + multi-level caching (SMART 60s, tool probe 5min), time-windowed history
+- 🪶 **Self-monitoring** — the overview shows the tool's own CPU / RSS / threads (measured ~1% CPU, ~66 MB RSS idle); GPU sampler skips vendor tools when no such GPU is present
 - 🔧 **CLI management** — `monitor-cli.py`: users, passwords, API keys, alerts
 
 ## 界面预览 / Screenshots
@@ -158,6 +160,7 @@ Web login uses `Authorization: Bearer <session token>` (the browser carries it a
 | AI_MONITOR_DATA_DIR | ./data | 认证/告警数据目录 / auth & alert data dir |
 | AI_MONITOR_DEBUG | 0 | 调试模式（开启 /api/all）/ debug mode |
 | AI_MONITOR_SAMPLE_INTERVAL | 1.5 | 采样间隔（秒）/ sample interval (s) |
+| AI_MONITOR_GPU_SAMPLE_INTERVAL | 2.0 | GPU 采样间隔（秒，越高越省 CPU）/ GPU sample interval (s) |
 | AI_MONITOR_HISTORY_WINDOW | 300 | 历史曲线保留时长（秒）/ history window (s) |
 | AI_MONITOR_SMART_TTL | 60 | SMART 采集缓存（秒）/ SMART cache (s) |
 | AI_MONITOR_SESSION_TTL | 43200 | Web 会话有效期（秒）/ session TTL (s) |
@@ -177,6 +180,7 @@ Web login uses `Authorization: Bearer <session token>` (the browser carries it a
 | `/api/auth/setup` | 首次创建管理员 | 公开 public |
 | `/api/auth/login` · `/logout` | 登录 / 登出 | — |
 | `/api/summary` · `/api/quick-stats` | 概览 / overview | 需要 auth |
+| `/api/monitor` | 本工具自身占用（CPU/内存/线程）/ self footprint | 需要 auth |
 | `/api/cpu` · `/gpu` · `/memory` · `/storage` · `/network` · `/temps` | 详情 / details | 需要 auth |
 | `/api/net-history` · `/gpu-history` · `/cpu-freq-history` · `/disk-io-history` | 曲线数据 / chart data | 需要 auth |
 | `/api/processes?sort_by=&search=` | 进程 / processes | 需要 auth |

@@ -35,7 +35,7 @@ logging.basicConfig(
 logger = logging.getLogger("ai-monitor")
 
 # ── Config (env overrides) ──────────────────────────────────────────────
-VERSION = "4.0"
+VERSION = "4.2"
 PORT = int(os.getenv("AI_MONITOR_PORT", "9527"))
 HOST = os.getenv("AI_MONITOR_HOST", "0.0.0.0")
 DEBUG = os.getenv("AI_MONITOR_DEBUG", "").lower() in ("1", "true")
@@ -58,7 +58,9 @@ HISTORY_MAX_POINTS = int(os.getenv("AI_MONITOR_HISTORY_POINTS", "240"))
 SMART_TTL = int(os.getenv("AI_MONITOR_SMART_TTL", "60"))
 TOOL_CHECK_TTL = 300
 SESSION_TTL_S = int(os.getenv("AI_MONITOR_SESSION_TTL", str(12 * 3600)))
-GPU_SAMPLE_INTERVAL = 2.0
+# GPU detail is the most expensive sampler (spawns intel_gpu_top / rocm-smi).
+# Default 2.0s; raise (e.g. 5) on low-power boxes to cut CPU further.
+GPU_SAMPLE_INTERVAL = float(os.getenv("AI_MONITOR_GPU_SAMPLE_INTERVAL", "2.0"))
 
 # ── Small helpers ───────────────────────────────────────────────────────
 def parse_float(s: Any, default: float = 0.0) -> float:
@@ -212,77 +214,80 @@ def collect_gpu_detail() -> Dict:
 
     # ── AMD via rocm-smi ──
     amd_topo = [t for t in topology if t["vendor"] == "amd"]
-    out1 = run_cmd([ROCM_SMI, "--showproductname", "--showtemp", "--showpower", "--showmemuse", "--showvoltage", "--json"], timeout=2)
-    if out1:
-        out2 = run_cmd([ROCM_SMI, "-g", "-c", "-m", "-o", "--json"], timeout=2)
-        out3 = run_cmd([ROCM_SMI, "--showpids", "verbose", "--json"], timeout=2)
-        try:
-            data1 = json.loads(out1)
-            data2 = json.loads(out2) if out2 else {}
-            data3 = json.loads(out3) if out3 else {}
+    # Skip the rocm-smi subprocesses entirely when no AMD GPU is present —
+    # they cost ~0.2s of CPU per cycle and would otherwise run pointlessly.
+    if amd_topo:
+        out1 = run_cmd([ROCM_SMI, "--showproductname", "--showtemp", "--showpower", "--showmemuse", "--showvoltage", "--json"], timeout=2)
+        if out1:
+            out2 = run_cmd([ROCM_SMI, "-g", "-c", "-m", "-o", "--json"], timeout=2)
+            out3 = run_cmd([ROCM_SMI, "--showpids", "verbose", "--json"], timeout=2)
+            try:
+                data1 = json.loads(out1)
+                data2 = json.loads(out2) if out2 else {}
+                data3 = json.loads(out3) if out3 else {}
 
-            # VRAM per AMD card from sysfs, in sorted card order
-            amd_cards = sorted(
-                c for c in SYSFS.glob("class/drm/card*")
-                if read_file_int(c / "device" / "vendor", 0) == 0x1002
-            )
-            amd_vram = []
-            for card in amd_cards:
-                dev = card / "device"
-                vt = read_file_int(dev / "mem_info_vram_total", 0)
-                vu = read_file_int(dev / "mem_info_vram_used", 0)
-                amd_vram.append((round(vt / 1024**2, 1), round(vu / 1024**2, 1)))
+                # VRAM per AMD card from sysfs, in sorted card order
+                amd_cards = sorted(
+                    c for c in SYSFS.glob("class/drm/card*")
+                    if read_file_int(c / "device" / "vendor", 0) == 0x1002
+                )
+                amd_vram = []
+                for card in amd_cards:
+                    dev = card / "device"
+                    vt = read_file_int(dev / "mem_info_vram_total", 0)
+                    vu = read_file_int(dev / "mem_info_vram_used", 0)
+                    amd_vram.append((round(vt / 1024**2, 1), round(vu / 1024**2, 1)))
 
-            # Map rocm-smi card keys to topology order
-            card_keys = [k for k in data1 if k != "rocm_smi"]
-            for idx, card_key in enumerate(card_keys):
-                if idx >= len(amd_topo):
-                    break
-                g = data1[card_key]
-                g2 = data2.get(card_key, {})
-                g3 = data3.get(card_key, {})
-                t = amd_topo[idx]
+                # Map rocm-smi card keys to topology order
+                card_keys = [k for k in data1 if k != "rocm_smi"]
+                for idx, card_key in enumerate(card_keys):
+                    if idx >= len(amd_topo):
+                        break
+                    g = data1[card_key]
+                    g2 = data2.get(card_key, {})
+                    g3 = data3.get(card_key, {})
+                    t = amd_topo[idx]
 
-                name = (g.get("Card Series") or g.get("Card Model") or t["name"]).strip()
-                vram_total_mb, vram_used_mb = (amd_vram[idx] if idx < len(amd_vram) else (0, 0))
+                    name = (g.get("Card Series") or g.get("Card Model") or t["name"]).strip()
+                    vram_total_mb, vram_used_mb = (amd_vram[idx] if idx < len(amd_vram) else (0, 0))
 
-                gpu_pids = []
-                if isinstance(g3, dict):
-                    for pid_key in g3:
-                        if pid_key.startswith("PID"):
-                            pid_info = g3[pid_key]
-                            gpu_pids.append({
-                                "pid": pid_info.get("PID", 0),
-                                "name": str(pid_info.get("Process Name", "Unknown"))[:40],
-                                "vram_used_mb": parse_float(pid_info.get("VRAM Used", 0)),
-                                "is_compute": "Yes" in str(pid_info.get("Is Compute Process", "")),
-                            })
+                    gpu_pids = []
+                    if isinstance(g3, dict):
+                        for pid_key in g3:
+                            if pid_key.startswith("PID"):
+                                pid_info = g3[pid_key]
+                                gpu_pids.append({
+                                    "pid": pid_info.get("PID", 0),
+                                    "name": str(pid_info.get("Process Name", "Unknown"))[:40],
+                                    "vram_used_mb": parse_float(pid_info.get("VRAM Used", 0)),
+                                    "is_compute": "Yes" in str(pid_info.get("Is Compute Process", "")),
+                                })
 
-                vram_pct = round(parse_float(g.get("GPU Memory Allocated (VRAM%)", 0)), 1)
-                gpu_util = round(parse_float(g.get("GPU Activity (%)", 0)), 1)
-                temp_edge = round(parse_float(g.get("Temperature (Sensor edge) (C)", 0)), 1)
+                    vram_pct = round(parse_float(g.get("GPU Memory Allocated (VRAM%)", 0)), 1)
+                    gpu_util = round(parse_float(g.get("GPU Activity (%)", 0)), 1)
+                    temp_edge = round(parse_float(g.get("Temperature (Sensor edge) (C)", 0)), 1)
 
-                info["rocm"].append({
-                    "id": t["id"],
-                    "name": name,
-                    "bus_id": t["bus_id"],
-                    "temp_edge": temp_edge,
-                    "temp_junction": round(parse_float(g.get("Temperature (Sensor junction) (C)", 0)), 1),
-                    "temp_memory": round(parse_float(g.get("Temperature (Sensor memory) (C)", 0)), 1),
-                    "power_w": round(parse_float(g.get("Average Graphics Package Power (W)", 0)), 1),
-                    "vram_used_mb": vram_used_mb,
-                    "vram_total_mb": vram_total_mb,
-                    "vram_percent": vram_pct,
-                    "utilization": gpu_util,
-                    "mem_activity": round(parse_float(g.get("GPU Memory Read/Write Activity (%)", 0)), 1),
-                    "sclk": round(parse_float(g2.get("sclk clock speed:", 0)), 0),
-                    "mclk": round(parse_float(g2.get("mclk clock speed:", 0)), 0),
-                    "socclk": round(parse_float(g2.get("socclk clock speed:", 0)), 0),
-                    "pids": gpu_pids,
-                })
-                _ensure_gpu_history(t["id"]).append((time.time(), gpu_util, vram_pct, temp_edge))
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse rocm-smi output: {e}")
+                    info["rocm"].append({
+                        "id": t["id"],
+                        "name": name,
+                        "bus_id": t["bus_id"],
+                        "temp_edge": temp_edge,
+                        "temp_junction": round(parse_float(g.get("Temperature (Sensor junction) (C)", 0)), 1),
+                        "temp_memory": round(parse_float(g.get("Temperature (Sensor memory) (C)", 0)), 1),
+                        "power_w": round(parse_float(g.get("Average Graphics Package Power (W)", 0)), 1),
+                        "vram_used_mb": vram_used_mb,
+                        "vram_total_mb": vram_total_mb,
+                        "vram_percent": vram_pct,
+                        "utilization": gpu_util,
+                        "mem_activity": round(parse_float(g.get("GPU Memory Read/Write Activity (%)", 0)), 1),
+                        "sclk": round(parse_float(g2.get("sclk clock speed:", 0)), 0),
+                        "mclk": round(parse_float(g2.get("mclk clock speed:", 0)), 0),
+                        "socclk": round(parse_float(g2.get("socclk clock speed:", 0)), 0),
+                        "pids": gpu_pids,
+                    })
+                    _ensure_gpu_history(t["id"]).append((time.time(), gpu_util, vram_pct, temp_edge))
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse rocm-smi output: {e}")
 
     # ── Intel via intel_gpu_top ──
     intel_topo = [t for t in topology if t["vendor"] == "intel"]
@@ -1789,6 +1794,41 @@ def get_health_detail() -> Dict:
     }
 
 
+# ── Self-monitoring (this tool's own footprint) ─────────────────────────
+_self_proc = psutil.Process()
+_self_cpu_last = None
+_self_cpu_last_t = 0.0
+
+
+def get_self_stats() -> Dict:
+    """CPU% + RSS of the monitor process itself (proves low footprint)."""
+    global _self_cpu_last, _self_cpu_last_t
+    try:
+        t = _self_proc.cpu_times()
+        cur = t.user + t.system
+        now = time.time()
+        cpu = None
+        if _self_cpu_last is not None and now - _self_cpu_last_t > 0.2:
+            dt = now - _self_cpu_last_t
+            cpu = round(max((cur - _self_cpu_last) / dt * 100, 0.0), 1)
+        _self_cpu_last = cur
+        _self_cpu_last_t = now
+        mem = _self_proc.memory_info().rss
+        return {
+            "pid": _self_proc.pid,
+            "cpu_percent": cpu,
+            "rss_mb": round(mem / 1024**2, 1),
+            "threads": _self_proc.num_threads(),
+            "uptime_s": int(now - _self_proc.create_time()),
+            "version": VERSION,
+            "sample_interval_s": SAMPLE_INTERVAL,
+            "gpu_sample_interval_s": GPU_SAMPLE_INTERVAL,
+        }
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return {"pid": os.getpid(), "cpu_percent": None, "rss_mb": None,
+                "threads": None, "uptime_s": 0, "version": VERSION}
+
+
 # ── FastAPI App ─────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -2003,6 +2043,12 @@ async def dashboard():
 @app.get("/api/health")
 async def api_health():
     return get_health_detail()
+
+
+@app.get("/api/monitor", dependencies=[Depends(require_auth)])
+async def api_monitor():
+    """This tool's own resource footprint (CPU% / RSS / threads)."""
+    return get_self_stats()
 
 
 @app.get("/api/summary", dependencies=[Depends(require_auth)])

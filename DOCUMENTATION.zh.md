@@ -425,6 +425,7 @@ API Key 格式：`amk_` + 32 字符随机串。**创建时只显示一次**，�
 | 端点 | 说明 | 数据来源 |
 |------|------|----------|
 | `GET /api/summary` | 概览（CPU%/温度/内存/GPU/网络/磁盘/负载） | 缓存 |
+| `GET /api/monitor` | 本工具自身占用（pid/CPU%/RSS/线程数/版本） | 现场读取 |
 | `GET /api/quick-stats` | 精简（uptime/load/cores） | 缓存 |
 | `GET /api/cpu` | CPU 详情（每核使用率/频率/温度/功耗/缓存） | 缓存 |
 | `GET /api/gpu` | GPU 详情（rocm/intel/sysfs 三源） | 缓存（2s） |

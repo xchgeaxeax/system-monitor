@@ -363,6 +363,7 @@ bash start.sh
 | 端点 | 方法 | 说明 | 响应大小 |
 |------|------|------|----------|
 | `/api/health` | GET | 健康检查 | ~200B |
+| `/api/monitor` | GET | 本工具自身占用（CPU%/RSS/线程） | ~150B |
 | `/api/summary` | GET | 精简摘要（状态栏） | ~300B |
 | `/api/quick-stats` | GET | Quick Stats 数据 | ~200B |
 | `/api/cpu` | GET | CPU 详细信息 | ~2KB |
