@@ -556,6 +556,7 @@ const state = {
   _logLoaded: false,
   _logLast: 0,
   errCount: 0,
+  serverDown: false,
 };
 let refreshTimer = null;
 const $ = id => document.getElementById(id);
@@ -590,6 +591,30 @@ function showError(msg) {
   b.style.display = 'block';
   clearTimeout(showError._t);
   showError._t = setTimeout(() => { b.style.display = 'none'; state.errCount = 0; }, 6000);
+}
+
+// Server reachability: the overview's base requests swallow errors, so a
+// dead server would otherwise look like stale-but-healthy data. Track
+// connectivity explicitly and surface it in the topbar + banner.
+function markServerDown() {
+  if (state.serverDown) return;
+  state.serverDown = true;
+  $('refresh-status').classList.add('paused');
+  $('refresh-text').textContent = 'Disconnected';
+  const b = $('error-banner');
+  b.textContent = '⚠ Cannot reach the monitor server — retrying…';
+  b.style.display = 'block';
+  clearTimeout(showError._t);
+}
+function markServerUp() {
+  if (!state.serverDown) return;
+  state.serverDown = false;
+  $('error-banner').style.display = 'none';
+  state.errCount = 0;
+  if (state.visible) {
+    $('refresh-status').classList.remove('paused');
+    $('refresh-text').textContent = 'Live';
+  }
 }
 
 // ── Modal (replaces native prompt/confirm — styled, non-blocking, testable) ──
@@ -940,7 +965,8 @@ async function fetchData() {
   const tab = state.tab;
   const jobs = [
     api('/api/summary').then(renderSummary).catch(e => {}),
-    api('/api/health').then(renderHealth).catch(e => {}),
+    api('/api/health').then(d => { renderHealth(d); markServerUp(); })
+      .catch(e => { if (e.message === 'Network error') markServerDown(); }),
     api('/api/alerts').then(renderAlerts).catch(e => {}),
     api('/api/monitor').then(renderMonitor).catch(e => {}),
   ];
@@ -1455,6 +1481,7 @@ function stopRefresh() {
 document.addEventListener('visibilitychange', () => {
   state.visible = !document.hidden;
   const st = $('refresh-status');
+  if (state.serverDown) return;  // keep "Disconnected" until the server is reachable again
   if (state.visible) { st.classList.remove('paused'); $('refresh-text').textContent = 'Live'; }
   else { st.classList.add('paused'); $('refresh-text').textContent = 'Paused'; }
 });
