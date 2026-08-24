@@ -3,3 +3,5 @@ __pycache__/
 data/
 server.py.bak*
 *.tmp
+.venv-test/
+.pytest_cache/

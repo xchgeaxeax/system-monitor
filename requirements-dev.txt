@@ -1,0 +1,4 @@
+# Test-only dependencies (runtime deps are in requirements.txt)
+-r requirements.txt
+pytest>=8.0
+httpx>=0.27

@@ -265,6 +265,21 @@ Configure under **Settings → Alert Notifications** (admin only). Each alert pu
 | smartmontools | SATA SMART | `apt install smartmontools` |
 | nvme-cli | NVMe SMART | `apt install nvme-cli` |
 
+## 测试 / Testing
+
+仓库自带 60 个测试（`tests/`），覆盖认证流程、RBAC、API key、登录限流、会话上限、各指标端点、告警引擎（触发/自动恢复/ack/删除）、webhook 配置（密钥保留 + 脱敏）以及纯函数（History、限流器、密码哈希、告警规则）。
+
+```bash
+python3 -m venv .venv-test && . .venv-test/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest tests/ -v
+```
+
+- 测试使用 `starlette.testclient` 直接调用 FastAPI app，**不占用端口、不启动真实采样线程**（采样间隔被设为 1 小时，测试手动触发 `_sample_once()`），也不触碰真实的 `data/`（用临时目录）。
+- 每次 push / PR 自动在 GitHub Actions 上跑（`python 3.11/3.12/3.13` 矩阵 + `py_compile` + `bash -n deploy.sh`）。
+
+The repo ships 60 tests (`tests/`) covering auth flow, RBAC, API keys, login rate limiting, session cap, every metric endpoint, the alert engine (trigger / auto-resolve / ack / delete), webhook config (secret preservation + masking), and pure helpers. Tests run in-process via `starlette.testclient` — no port, no real sampler threads, no real `data/`. CI runs the suite on every push/PR across Python 3.11–3.13.
+
 ## 卸载 / Uninstall
 
 ```bash

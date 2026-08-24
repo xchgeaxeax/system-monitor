@@ -139,7 +139,7 @@ td.num,th.num{text-align:right}
 
 /* ── Graphs ── */
 .graph-wrap{position:relative}
-.graph{width:100%;height:120px;border-radius:7px;background:var(--graph-bg);display:block;cursor:crosshair}
+.graph{width:100%;height:120px;border-radius:7px;background:var(--graph-bg);display:block;cursor:crosshair;touch-action:pan-y}
 .graph.small{height:80px}
 .graph-legend{display:flex;gap:14px;font-size:11px;color:var(--muted);margin-top:5px;flex-wrap:wrap}
 .graph-legend .lg{display:flex;align-items:center;gap:5px}
@@ -207,6 +207,23 @@ td.num,th.num{text-align:right}
   .stat .value{font-size:22px}
   .topbar .right span.hide-m{display:none}
   .tabs{top:46px}
+  /* Charts: taller on small screens so the line isn't cramped at 375px. */
+  .graph{height:150px}
+  .graph.small{height:110px}
+  /* Bigger touch targets (≈44px) for buttons. */
+  .mini-btn{padding:8px 13px;font-size:13px}
+  .icon-btn{padding:8px 11px;font-size:14px}
+  .tab{padding:11px 12px;font-size:13px}
+  /* Denser tables on narrow screens. */
+  table{font-size:12px}
+  th{padding:6px 7px}
+  td{padding:6px 7px}
+  .content{padding:10px 10px}
+  .card-body{padding:10px}
+  .card-header{padding:10px}
+  .topbar{padding:8px 10px}
+  .version{display:none}
+  .auth-card{padding:26px 20px}
 }
 </style>
 </head>
@@ -335,7 +352,7 @@ td.num,th.num{text-align:right}
   <div class="card">
     <div class="card-header"><h2>CPU Frequency</h2></div>
     <div class="card-body open">
-      <div class="graph-wrap"><canvas id="cpu-freq-graph" class="graph small"></canvas></div>
+      <div class="graph-wrap"><canvas id="cpu-freq-graph" class="graph small" role="img" aria-label="CPU frequency over time"></canvas></div>
       <div class="graph-time"><span>-</span><span>-</span></div>
     </div>
   </div>
@@ -381,7 +398,7 @@ td.num,th.num{text-align:right}
   <div class="card">
     <div class="card-header"><h2>Disk I/O</h2></div>
     <div class="card-body open">
-      <div class="graph-wrap"><canvas id="disk-graph" class="graph small"></canvas></div>
+      <div class="graph-wrap"><canvas id="disk-graph" class="graph small" role="img" aria-label="Disk I/O: read and write throughput over time"></canvas></div>
       <div class="graph-legend" id="disk-legend"></div>
       <div class="graph-time"><span>-</span><span>-</span></div>
       <div class="table-wrap" style="margin-top:10px"><table><thead><tr><th>Disk</th><th class="num">Read</th><th class="num">Write</th><th class="num">Read rate</th><th class="num">Write rate</th></tr></thead><tbody id="disk-table"></tbody></table></div>
@@ -398,7 +415,7 @@ td.num,th.num{text-align:right}
   <div class="card">
     <div class="card-header"><h2>Throughput</h2></div>
     <div class="card-body open">
-      <div class="graph-wrap"><canvas id="net-graph-2" class="graph"></canvas></div>
+      <div class="graph-wrap"><canvas id="net-graph-2" class="graph" role="img" aria-label="Network throughput chart: download and upload over time"></canvas></div>
       <div class="graph-legend"><span class="lg"><span class="sw" style="background:var(--cyan)"></span>Download</span><span class="lg"><span class="sw" style="background:var(--purple)"></span>Upload</span></div>
       <div class="graph-time"><span>-</span><span>-</span></div>
     </div>
@@ -833,8 +850,41 @@ function makeGraph(id, series) {
     if (g) { g.hover = -1; drawGraph(id); }
     $('tooltip').style.display = 'none';
   });
+  attachGraphTouch(id, canvas);
   // Redraw on resize
   new ResizeObserver(() => drawGraph(id)).observe(canvas);
+}
+
+// Touch: tap to inspect a point; horizontal scrub to trace the line.
+// Vertical swipes are left alone so the page still scrolls over the chart.
+function attachGraphTouch(id, canvas) {
+  let sx = 0, sy = 0, scrubbing = false, hideTimer = 0;
+  canvas.addEventListener('touchstart', e => {
+    const t = e.touches[0];
+    if (!t) return;
+    sx = t.clientX; sy = t.clientY; scrubbing = false;
+    if (hideTimer) { clearTimeout(hideTimer); hideTimer = 0; }
+    onGraphHover(id, {clientX: sx, clientY: sy});
+  }, {passive: true});
+  canvas.addEventListener('touchmove', e => {
+    const t = e.touches[0];
+    if (!t) return;
+    const dx = t.clientX - sx, dy = t.clientY - sy;
+    if (!scrubbing && Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) scrubbing = true;
+    if (scrubbing) {
+      e.preventDefault();
+      onGraphHover(id, {clientX: t.clientX, clientY: t.clientY});
+    }
+  }, {passive: false});
+  canvas.addEventListener('touchend', () => {
+    scrubbing = false;
+    // Keep the tooltip visible briefly after the finger lifts, then clear it.
+    hideTimer = setTimeout(() => {
+      const g = graphs[id];
+      if (g) { g.hover = -1; drawGraph(id); }
+      $('tooltip').style.display = 'none';
+    }, 2500);
+  });
 }
 
 function setupCanvas(canvas) {
@@ -1228,7 +1278,7 @@ function renderGpu(g) {
         body += `<div style="margin-top:8px;font-size:12px;color:var(--muted)">Processes:</div>` +
           gpu.pids.map(p => `<div class="row"><span class="label" style="max-width:220px;overflow:hidden;text-overflow:ellipsis">${esc(p.name)} (PID ${p.pid})</span><span class="value">${p.vram_used_mb} MB VRAM</span></div>`).join('');
       }
-      body += `<div class="graph-wrap" style="margin-top:10px"><canvas id="gpu-graph-${esc(gpu.id)}" class="graph small"></canvas></div>`;
+      body += `<div class="graph-wrap" style="margin-top:10px"><canvas id="gpu-graph-${esc(gpu.id)}" class="graph small" role="img" aria-label="GPU utilization and VRAM over time"></canvas></div>`;
     }
     return `<div class="card gpu-card"><div class="card-header"><h2>${esc(gpu.name)}</h2><span class="badge">${esc(gpu.bus_id || '')}</span></div><div class="card-body open">${body}</div></div>`;
   }).join('');
@@ -1252,6 +1302,7 @@ function renderGpu(g) {
         if (g) { g.hover = -1; drawGraph('gpu-graph-' + gpu.id); }
         $('tooltip').style.display = 'none';
       });
+      attachGraphTouch('gpu-graph-' + gpu.id, canvas);
       new ResizeObserver(() => drawGraph('gpu-graph-' + gpu.id)).observe(canvas);
       drawGraph('gpu-graph-' + gpu.id);
     }
@@ -1362,15 +1413,32 @@ async function killProcess(pid) {
   const name = _procNames[pid] || `PID ${pid}`;
   const ok = await showModal({
     title: 'Terminate process?',
-    body: `Send <code>SIGTERM</code> to <b>${esc(name)}</b> (PID ${pid})?<br>It will try to exit gracefully; use the API with sig=9 for SIGKILL if it won't die.`,
+    body: `Send <code>SIGTERM</code> to <b>${esc(name)}</b> (PID ${pid})?<br>It will try to exit gracefully. If it's still alive afterwards you'll be offered <code>SIGKILL</code>.`,
     okLabel: 'SIGTERM', okDanger: true,
   });
   if (!ok) return;
   try {
-    const r = await api('/api/processes/kill', {method: 'POST', body: JSON.stringify({pid, sig: 15})});
-    console.log('killed', r);
-    fetchData();
-  } catch (e) { alert('Kill failed: ' + e.message); }
+    await api('/api/processes/kill', {method: 'POST', body: JSON.stringify({pid, sig: 15})});
+  } catch (e) { alert('Kill failed: ' + e.message); return; }
+  // Give it a moment to exit, then check whether it's still running.
+  await new Promise(r => setTimeout(r, 2000));
+  let still = false;
+  try {
+    const procs = await api('/api/processes?search=' + encodeURIComponent(String(pid)));
+    still = procs.some(p => p.pid === pid);
+  } catch (e) { /* keep going; just skip the escalation prompt */ }
+  if (still) {
+    const ok2 = await showModal({
+      title: 'Process still running',
+      body: `<b>${esc(name)}</b> (PID ${pid}) ignored SIGTERM. Send <code>SIGKILL</code> to force it?<br><span style="color:var(--muted)">This cannot be undone and may leave temp files/locks behind.</span>`,
+      okLabel: 'SIGKILL', okDanger: true,
+    });
+    if (ok2) {
+      try { await api('/api/processes/kill', {method: 'POST', body: JSON.stringify({pid, sig: 9})}); }
+      catch (e) { alert('SIGKILL failed: ' + e.message); }
+    }
+  }
+  fetchData();
 }
 document.querySelectorAll('th.sortable').forEach(th => th.addEventListener('click', () => {
   state.procSort = th.dataset.sort;
