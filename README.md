@@ -42,7 +42,7 @@ A lightweight performance monitor for AI / home servers. Key design:
 - 🎨 **黑白双主题** — 跟随系统 `prefers-color-scheme` 自动切换，也可手动 深色/浅色/自动
 - 📈 **实时图表** — 网络吞吐、CPU 频率、磁盘 I/O、GPU 利用率/VRAM 曲线（Canvas 自绘，断线 + hover 提示）
 - 🖥️ **全覆盖** — CPU / GPU(ROCm+Intel+sysfs) / 内存 / 存储+SMART / 网络 / 温度 / 进程 / 系统日志
-- ⚡ **高性能** — 采样线程 + 多级缓存（SMART 60s、工具探测 5min），历史按时间窗口裁剪；GZip 压缩响应；系统日志默认不轮询（手动刷新或勾选 auto 每 5s 刷新），避免频繁 spawn journalctl
+- ⚡ **高性能** — 采样线程 + 多级缓存（SMART 60s、工具探测 5min），历史按时间窗口裁剪；zstd/gzip 压缩响应（zstd 优先，缺 `zstandard` 包自动回退 gzip）；系统日志默认不轮询（手动刷新或勾选 auto 每 5s 刷新），避免频繁 spawn journalctl
 - 📱 **PWA** — 可"添加到主屏幕"当 App 用，离线可打开面板（Service Worker 缓存）
 - ♿ **可访问性** — 标签页支持键盘导航（方向键/Home/End）与 ARIA 标注
 - 🪶 **自我监控** — 概览页显示本工具自身 CPU / 内存 / 线程数（实测空闲约 1% CPU、~66 MB 内存）；无对应 GPU 时自动跳过厂商工具
@@ -56,7 +56,7 @@ A lightweight performance monitor for AI / home servers. Key design:
 - 🎨 **Dark & light theme** — follows `prefers-color-scheme`, or manual dark/light/auto
 - 📈 **Live charts** — network throughput, CPU frequency, disk I/O, GPU utilization/VRAM (custom Canvas, gap-aware + hover tooltip)
 - 🖥️ **Full coverage** — CPU / GPU (ROCm+Intel+sysfs) / memory / storage+SMART / network / temps / processes / system logs
-- ⚡ **High performance** — sampler thread + multi-level caching (SMART 60s, tool probe 5min), time-windowed history; GZip-compressed responses; system logs don't poll by default (manual refresh or opt-in "auto" every 5s)
+- ⚡ **High performance** — sampler thread + multi-level caching (SMART 60s, tool probe 5min), time-windowed history; zstd/gzip-compressed responses (zstd preferred, auto-fallback to gzip if the `zstandard` package is absent); system logs don't poll by default (manual refresh or opt-in "auto" every 5s)
 - 📱 **PWA** — "Add to Home Screen" as an app; opens offline (Service Worker cache)
 - ♿ **Accessible** — keyboard-navigable tabs (arrows/Home/End) + ARIA labels
 - 🪶 **Self-monitoring** — the overview shows the tool's own CPU / RSS / threads (measured ~1% CPU, ~66 MB RSS idle); GPU sampler skips vendor tools when no such GPU is present
@@ -177,6 +177,10 @@ Web login uses `Authorization: Bearer <session token>` (the browser carries it a
 | AI_MONITOR_LOGIN_RATE_LIMIT | 5 | 登录限流：每窗口最大尝试次数（0=关闭）/ login attempts per window (0=off) |
 | AI_MONITOR_LOGIN_RATE_WINDOW | 60 | 登录限流窗口（秒）/ login rate window (s) |
 | AI_MONITOR_MAX_SESSIONS | 500 | 最大并发 Web 会话数（超出淘汰最旧）/ max concurrent sessions |
+| AI_MONITOR_COMPRESS | zstd,gzip | 响应压缩偏好（逗号列表，靠前者优先；`none`=关闭）/ compression preference |
+| AI_MONITOR_COMPRESS_MIN_SIZE | 500 | 压缩阈值（字节，小于不压）/ min size to compress (bytes) |
+| AI_MONITOR_ZSTD_LEVEL | 6 | zstd 压缩级别（1-22，越高越小越慢）/ zstd level |
+| AI_MONITOR_GZIP_LEVEL | 6 | gzip 压缩级别（1-9）/ gzip level |
 | AI_MONITOR_ROCM_SMI | rocm-smi | ROCm SMI 路径 |
 | AI_MONITOR_INTEL_GPU_TOP | intel_gpu_top | Intel GPU Top 路径 |
 | AI_MONITOR_SMARTCTL | smartctl | smartctl 路径 |
@@ -253,7 +257,7 @@ Configure under **Settings → Alert Notifications** (admin only). Each alert pu
 ## 系统要求 / Requirements
 
 - Linux（Ubuntu/Debian/CentOS/Fedora/openSUSE）
-- Python 3.8+，`fastapi` / `uvicorn` / `psutil`
+- Python 3.8+，`fastapi` / `uvicorn` / `psutil` / `zstandard`（zstd 压缩；缺失时自动回退 gzip）
 - systemd
 
 ## 可选工具 / Optional Tools

@@ -28,12 +28,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import gzip as _gzip
+import zlib as _zlib
+
 import psutil
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
+from starlette.datastructures import Headers
 from uvicorn import Config, Server
+
+# zstd is optional: if the `zstandard` package isn't installed we fall back to
+# gzip transparently (the middleware checks ZSTD_AVAILABLE at request time).
+try:
+    import zstandard as _zstd
+    ZSTD_AVAILABLE = True
+except ImportError:
+    _zstd = None
+    ZSTD_AVAILABLE = False
 
 # ── Logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -75,6 +87,13 @@ LOGIN_RATE_LIMIT = int(os.getenv("AI_MONITOR_LOGIN_RATE_LIMIT", "5"))
 LOGIN_RATE_WINDOW_S = int(os.getenv("AI_MONITOR_LOGIN_RATE_WINDOW", "60"))
 # Max concurrent web sessions kept in auth.json (oldest evicted beyond this).
 MAX_SESSIONS = int(os.getenv("AI_MONITOR_MAX_SESSIONS", "500"))
+# Response compression. Preference order is a comma list (zstd first = preferred);
+# "none" disables compression entirely. zstd is used only if the `zstandard`
+# package is importable, otherwise it falls back to gzip.
+COMPRESS_ENCODINGS = [e.strip() for e in os.getenv("AI_MONITOR_COMPRESS", "zstd,gzip").split(",") if e.strip()]
+COMPRESS_MIN_SIZE = int(os.getenv("AI_MONITOR_COMPRESS_MIN_SIZE", "500"))
+ZSTD_LEVEL = int(os.getenv("AI_MONITOR_ZSTD_LEVEL", "6"))
+GZIP_LEVEL = int(os.getenv("AI_MONITOR_GZIP_LEVEL", "6"))
 # Graceful shutdown: set on SIGTERM/SIGINT so sampler threads can exit
 # cleanly instead of being killed mid-write.
 _shutdown = threading.Event()
@@ -2103,10 +2122,113 @@ async def lifespan(app: FastAPI):
     logger.info("System Monitor v4 stopped")
 
 
+# ── Response compression (zstd preferred, gzip fallback) ────────────────
+# A pure-ASGI middleware (NOT BaseHTTPMiddleware) so it has no per-request
+# task-group overhead. It buffers the body (all responses here are JSON/HTML,
+# none are streamed) and picks the best encoding the client accepts:
+#   1. zstd  — if the client accepts it, `zstandard` is installed, and it's in
+#              COMPRESS_ENCODINGS. Smaller + faster than gzip for JSON.
+#   2. gzip  — universal fallback.
+#   3. identity — if the client accepts neither, or the body is below
+#              COMPRESS_MIN_SIZE, or the path is in COMPRESS_EXCLUDE_PATHS
+#              (e.g. /sw.js — some browsers reject a compressed service worker).
+_EXCLUDE_CONTENT_TYPES = {
+    "application/gzip", "application/x-gzip", "application/zip",
+    "image/avif", "image/gif", "image/jpeg", "image/png", "image/webp",
+    "audio/*", "video/*", "font/woff", "font/woff2", "text/event-stream",
+}
+COMPRESS_EXCLUDE_PATHS = {"/sw.js"}
+
+
+def _negotiate_encoding(accept_encoding: str, path: str) -> Optional[str]:
+    """Return the best encoding for this request, or None for identity."""
+    if path in COMPRESS_EXCLUDE_PATHS:
+        return None
+    ae = (accept_encoding or "").lower()
+    if "zstd" in ae and "zstd" in COMPRESS_ENCODINGS and ZSTD_AVAILABLE:
+        return "zstd"
+    if "gzip" in ae and "gzip" in COMPRESS_ENCODINGS:
+        return "gzip"
+    return None
+
+
+class CompressionMiddleware:
+    def __init__(self, app):
+        self.app = app
+        self._zstd_compressor = _zstd.ZstdCompressor(level=ZSTD_LEVEL) if ZSTD_AVAILABLE else None
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or "none" in COMPRESS_ENCODINGS:
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        encoding = _negotiate_encoding(headers.get("Accept-Encoding", ""), scope["path"])
+        if encoding is None:
+            await self.app(scope, receive, send)
+            return
+        await self._respond(scope, receive, send, encoding)
+
+    async def _respond(self, scope, receive, send, encoding: str):
+        status = None
+        start_headers = None
+        body = b""
+        excluded = False
+        content_type = ""
+
+        async def inner_send(message):
+            nonlocal status, start_headers, body, excluded, content_type
+            mtype = message["type"]
+            if mtype == "http.response.start":
+                status = message["status"]
+                start_headers = message["headers"]
+                h = Headers(raw=start_headers)
+                content_type = h.get("content-type", "").partition(";")[0].strip().lower()
+                excluded = ("content-encoding" in h
+                            or status == 206
+                            or any(content_type == ct or content_type.split("/")[0] + "/*" == ct
+                                   for ct in _EXCLUDE_CONTENT_TYPES))
+            elif mtype == "http.response.body":
+                body += message.get("body", b"")
+                # more_body is ignored: responses are not streamed, so the
+                # first body message is the whole payload.
+
+        await self.app(scope, receive, inner_send)
+
+        if status is None:
+            return
+        if excluded or len(body) < COMPRESS_MIN_SIZE:
+            await send({"type": "http.response.start", "status": status, "headers": start_headers})
+            await send({"type": "http.response.body", "body": body})
+            return
+
+        if encoding == "zstd":
+            compressed = self._zstd_compressor.compress(body)
+        else:
+            compressed = _gzip.compress(body, compresslevel=GZIP_LEVEL)
+
+        # Only advertise the encoding if it actually shrank the body.
+        if len(compressed) >= len(body):
+            await send({"type": "http.response.start", "status": status, "headers": start_headers})
+            await send({"type": "http.response.body", "body": body})
+            return
+
+        new_headers = list(start_headers)
+        new_headers = [(k, v) for k, v in new_headers if k.lower() not in (b"content-length", b"content-encoding")]
+        new_headers.append((b"content-encoding", encoding.encode()))
+        new_headers.append((b"content-length", str(len(compressed)).encode()))
+        # Vary so caches key on the client's Accept-Encoding.
+        vary = next((v for k, v in start_headers if k.lower() == b"vary"), b"")
+        if b"accept-encoding" not in vary.lower():
+            new_headers.append((b"vary", (b", " if vary else b"") + b"accept-encoding"))
+        await send({"type": "http.response.start", "status": status, "headers": new_headers})
+        await send({"type": "http.response.body", "body": compressed})
+
+
 app = FastAPI(title="System Performance Monitor", version=VERSION, lifespan=lifespan)
 
-# Compress responses >500 bytes (dashboard HTML, process lists, logs).
-app.add_middleware(GZipMiddleware, minimum_size=500)
+# Compress responses >COMPRESS_MIN_SIZE bytes (dashboard HTML, process lists,
+# logs). zstd preferred, gzip fallback; /sw.js is always served uncompressed.
+app.add_middleware(CompressionMiddleware)
 
 
 @app.exception_handler(Exception)
