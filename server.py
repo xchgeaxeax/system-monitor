@@ -4,18 +4,25 @@ System Performance Monitor v4
 - On-demand refresh architecture: only responds to requests when page is visible
 - Background sampler thread (1.5s) keeps metrics hot; API endpoints are non-blocking reads
 - Auth: username/password (first-run setup) + API keys for tool access
-- Alert engine: persistent alert history with acknowledge/delete
+- Security: PBKDF2(390k) password hashing, login rate limiting, session cap
+- Alert engine: persistent alert history with acknowledge/delete + webhook
+  notifications (Bark / Telegram / DingTalk / WeCom / generic JSON)
+- Process management: admin can terminate processes (SIGTERM/SIGKILL)
 - Covers: CPU/GPU/Memory/Storage/Network/Temperature/Processes/System Logs
 """
 import hashlib
 import json
 import logging
 import os
+import queue
 import re
 import secrets
+import socket
 import subprocess
 import threading
 import time
+import urllib.request
+import urllib.error
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +30,8 @@ from typing import Any, Dict, List, Optional
 
 import psutil
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 from uvicorn import Config, Server
 
@@ -35,7 +43,7 @@ logging.basicConfig(
 logger = logging.getLogger("ai-monitor")
 
 # ── Config (env overrides) ──────────────────────────────────────────────
-VERSION = "4.2"
+VERSION = "4.3"
 PORT = int(os.getenv("AI_MONITOR_PORT", "9527"))
 HOST = os.getenv("AI_MONITOR_HOST", "0.0.0.0")
 DEBUG = os.getenv("AI_MONITOR_DEBUG", "").lower() in ("1", "true")
@@ -61,6 +69,15 @@ SESSION_TTL_S = int(os.getenv("AI_MONITOR_SESSION_TTL", str(12 * 3600)))
 # GPU detail is the most expensive sampler (spawns intel_gpu_top / rocm-smi).
 # Default 2.0s; raise (e.g. 5) on low-power boxes to cut CPU further.
 GPU_SAMPLE_INTERVAL = float(os.getenv("AI_MONITOR_GPU_SAMPLE_INTERVAL", "2.0"))
+# Login rate limiting: max attempts per (IP, username) per window, and the
+# lockout window in seconds. Set attempts to 0 to disable.
+LOGIN_RATE_LIMIT = int(os.getenv("AI_MONITOR_LOGIN_RATE_LIMIT", "5"))
+LOGIN_RATE_WINDOW_S = int(os.getenv("AI_MONITOR_LOGIN_RATE_WINDOW", "60"))
+# Max concurrent web sessions kept in auth.json (oldest evicted beyond this).
+MAX_SESSIONS = int(os.getenv("AI_MONITOR_MAX_SESSIONS", "500"))
+# Graceful shutdown: set on SIGTERM/SIGINT so sampler threads can exit
+# cleanly instead of being killed mid-write.
+_shutdown = threading.Event()
 
 # ── Small helpers ───────────────────────────────────────────────────────
 def parse_float(s: Any, default: float = 0.0) -> float:
@@ -401,8 +418,64 @@ _auth_lock = threading.Lock()  # guards auth.json read-modify-write
 ROLES = ("admin", "user")
 
 
+class LoginRateLimiter:
+    """Sliding-window login throttle keyed by (ip, username).
+
+    Pure in-memory: survives restarts not required (attackers get a fresh
+    window), keeps auth.json clean and startup fast.
+    """
+
+    def __init__(self, limit: int, window_s: int):
+        self.limit = limit
+        self.window_s = window_s
+        self._lock = threading.Lock()
+        self._attempts: Dict[str, List[float]] = {}
+
+    def check(self, key: str) -> None:
+        """Raise 429 with retry-after if the window is exhausted."""
+        if self.limit <= 0:
+            return
+        now = time.time()
+        with self._lock:
+            ts = [t for t in self._attempts.get(key, []) if now - t < self.window_s]
+            self._attempts[key] = ts
+            if len(ts) >= self.limit:
+                retry = int(self.window_s - (now - ts[0])) + 1
+                raise HTTPException(429, f"Too many login attempts — try again in {retry}s")
+
+    def record(self, key: str) -> None:
+        if self.limit <= 0:
+            return
+        now = time.time()
+        with self._lock:
+            ts = self._attempts.setdefault(key, [])
+            ts.append(now)
+            # Opportunistic cleanup so the dict can't grow unbounded.
+            if len(ts) > 1000:
+                cutoff = now - self.window_s
+                self._attempts = {
+                    k: [t for t in v if t > cutoff]
+                    for k, v in self._attempts.items()
+                }
+
+    def clear(self, key: str) -> None:
+        with self._lock:
+            self._attempts.pop(key, None)
+
+
+login_limiter = LoginRateLimiter(LOGIN_RATE_LIMIT, LOGIN_RATE_WINDOW_S)
+# First-run setup is even stricter: 3 attempts per 5 minutes per IP.
+setup_limiter = LoginRateLimiter(3, 300)
+
+
 def _hash_password(password: str, salt: bytes) -> str:
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PBKDF2_ITER).hex()
+
+
+# Fixed dummy credential used to equalize login timing for unknown users.
+_DUMMY_SALT = b"\x00" * 16
+_DUMMY_HASH = _hash_password("system-monitor-dummy-password", _DUMMY_SALT)
+_DUMMY_USER = {"salt": _DUMMY_SALT.hex(), "hash": _DUMMY_HASH}
 
 
 def _load_auth() -> Dict:
@@ -454,6 +527,21 @@ def _count_admins(data: Dict) -> int:
     return sum(1 for u in data.get("users", {}).values() if u.get("role") == "admin")
 
 
+def _add_session(data: Dict, token: str, username: str) -> None:
+    """Register a web session, evicting the oldest ones past MAX_SESSIONS."""
+    sessions = data.setdefault("sessions", {})
+    sessions[token] = {
+        "username": username, "kind": "web",
+        "created_at": now_iso(), "expires_at": time.time() + SESSION_TTL_S,
+    }
+    if MAX_SESSIONS > 0 and len(sessions) > MAX_SESSIONS:
+        # Evict oldest first. Stable sort: ties in created_at keep
+        # insertion order, so the earliest-registered session goes first.
+        ordered = sorted(sessions.items(), key=lambda kv: kv[1].get("created_at", ""))
+        for old_token, _ in ordered[: len(sessions) - MAX_SESSIONS]:
+            sessions.pop(old_token, None)
+
+
 def create_admin(username: str, password: str) -> Dict:
     """First-run setup: create the initial admin account."""
     salt = secrets.token_bytes(16)
@@ -471,27 +559,28 @@ def create_admin(username: str, password: str) -> Dict:
         data.setdefault("keys", {})
         data.setdefault("sessions", {})
         token = secrets.token_hex(32)
-        data["sessions"][token] = {
-            "username": username, "kind": "web",
-            "created_at": now_iso(), "expires_at": time.time() + SESSION_TTL_S,
-        }
+        _add_session(data, token, username)
         _save_auth(data)
     return {"token": token, "username": username, "role": "admin", "expires_in": SESSION_TTL_S}
 
 
 def login(username: str, password: str) -> Dict:
-    # Verify outside the lock (PBKDF2 takes ~100ms)
+    # Verify outside the lock (PBKDF2 takes ~100ms). Always run the hash —
+    # even for an unknown user (against a dummy) — so response timing doesn't
+    # reveal which usernames exist.
     with _auth_lock:
         user = _load_auth().get("users", {}).get(username)
-    if not user or not verify_password(password, user):
+    if user:
+        ok = verify_password(password, user)
+    else:
+        verify_password(password, _DUMMY_USER)  # burn the same CPU, ignore result
+        ok = False
+    if not ok:
         raise HTTPException(401, "Invalid username or password")
     token = secrets.token_hex(32)
     with _auth_lock:
         data = _load_auth()
-        data.setdefault("sessions", {})[token] = {
-            "username": username, "kind": "web",
-            "created_at": now_iso(), "expires_at": time.time() + SESSION_TTL_S,
-        }
+        _add_session(data, token, username)
         _save_auth(data)
     return {"token": token, "username": username, "role": user.get("role", "user"),
             "expires_in": SESSION_TTL_S}
@@ -687,6 +776,7 @@ class AlertManager:
         available: set of rule families whose data source is currently present.
         Only rules from available families can auto-resolve (prevents
         spurious resolution when a data source is temporarily missing)."""
+        triggered, resolved = [], []
         with self.lock:
             self._reload_if_changed()
             changed = False
@@ -701,6 +791,7 @@ class AlertManager:
                         "since": now_iso(),
                         "acknowledged": False,
                     }
+                    triggered.append(self.active[rid])
                     changed = True
             # auto-resolve rules that cleared (only for families with live data)
             for rid in list(self.active.keys()):
@@ -716,9 +807,15 @@ class AlertManager:
                 a["resolved_at"] = now_iso()
                 a["auto_resolved"] = True
                 self.history.insert(0, a)
+                resolved.append(a)
                 changed = True
             if changed:
                 self._save()
+        # Fire webhooks outside the lock (non-blocking: queued, worker sends).
+        for a in triggered:
+            webhook_notify_alert(a, "alert")
+        for a in resolved:
+            webhook_notify_alert(a, "resolved")
 
     def acknowledge(self, rule_id: str) -> bool:
         with self.lock:
@@ -772,6 +869,163 @@ class AlertManager:
 
 
 alerts = AlertManager()
+
+# ── Webhook notifications (Bark / Telegram / DingTalk / WeCom / generic) ─
+# Config: data/webhook.json  {enabled, channels:[{type,url,token,device,
+#   min_severity}], cooldown_s, last:{rule_id: ts}}
+# A single background worker drains a queue so HTTP handlers and the sampler
+# thread never block on outbound network calls.
+WEBHOOK_FILE = DATA_DIR / "webhook.json"
+WEBHOOK_DEFAULTS = {"enabled": False, "channels": [], "cooldown_s": 3600, "last": {}}
+
+
+def _load_webhook_cfg() -> Dict:
+    try:
+        with open(WEBHOOK_FILE) as f:
+            cfg = json.load(f)
+        cfg.setdefault("enabled", False)
+        cfg.setdefault("channels", [])
+        cfg.setdefault("cooldown_s", 3600)
+        cfg.setdefault("last", {})
+        return cfg
+    except Exception:
+        return dict(WEBHOOK_DEFAULTS, channels=[], last={})
+
+
+def _save_webhook_cfg(cfg: Dict):
+    tmp = WEBHOOK_FILE.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=2)
+    tmp.replace(WEBHOOK_FILE)
+
+
+def _webhook_public(cfg: Dict) -> Dict:
+    """Config without secrets (tokens/URLs masked)."""
+    chans = []
+    for c in cfg.get("channels", []):
+        chans.append({
+            "type": c.get("type", "generic"),
+            "configured": bool(c.get("url")),
+            "min_severity": c.get("min_severity", "warning"),
+        })
+    return {"enabled": cfg.get("enabled", False), "channels": chans,
+            "cooldown_s": cfg.get("cooldown_s", 3600)}
+
+
+class WebhookNotifier:
+    def __init__(self):
+        self._q: "queue.Queue" = queue.Queue()
+        self._lock = threading.Lock()
+        self._worker = threading.Thread(target=self._run, daemon=True, name="webhook-worker")
+        self._worker.start()
+
+    def _run(self):
+        while True:
+            item = self._q.get()
+            try:
+                self._send(item)
+            except Exception as e:
+                logger.warning(f"Webhook delivery failed: {e}")
+
+    def _send(self, item: Dict):
+        cfg = _load_webhook_cfg()
+        if not cfg.get("enabled"):
+            return
+        sev_rank = {"info": 0, "warning": 1, "danger": 2}
+        for ch in cfg.get("channels", []):
+            url = ch.get("url", "")
+            # Telegram needs a bot token; the "url" field carries the chat id.
+            if not url and not (ch.get("type") == "telegram" and ch.get("token")):
+                continue
+            if sev_rank.get(item["severity"], 1) < sev_rank.get(ch.get("min_severity", "warning"), 1):
+                continue
+            try:
+                self._deliver(ch, url, item)
+            except Exception as e:
+                logger.warning(f"Webhook [{ch.get('type')}] failed: {e}")
+
+    @staticmethod
+    def _payload(ch: Dict, url: str, item: Dict) -> tuple:
+        """Build (headers, body) for the channel type."""
+        host = socket.gethostname()
+        title = f"{'🔴' if item['severity'] == 'danger' else '🟡'} {item['event']}: {host}"
+        text = f"{item['message']}\n({host}, {item['when']})"
+        t = ch.get("type", "generic")
+        if t == "bark":
+            return ({"Content-Type": "application/json"},
+                    {"title": title[:100], "body": text, "icon": "",
+                     "group": "system-monitor", "sound": "", "url": ""})
+        if t == "telegram":
+            # "url" field carries the chat id; "token" is the bot token.
+            return ({"Content-Type": "application/json"},
+                    {"chat_id": url, "text": f"{title}\n{text}",
+                     "disable_notification": False})
+        if t == "dingtalk":
+            return ({"Content-Type": "application/json"},
+                    {"msgtype": "text", "text": {"content": f"{title}\n{text}"}})
+        if t == "wecom":
+            return ({"Content-Type": "application/json"},
+                    {"msgtype": "text", "text": {"content": f"{title}\n{text}"}})
+        # generic: POST JSON {event, severity, message, rule_id, host, when}
+        return ({"Content-Type": "application/json"},
+                {"event": item["event"], "severity": item["severity"],
+                 "message": item["message"], "rule_id": item["rule_id"],
+                 "host": host, "when": item["when"]})
+
+    def _deliver(self, ch: Dict, url: str, item: Dict):
+        t = ch.get("type", "generic")
+        if t == "bark":
+            url = f"{url.rstrip('/')}/{ch.get('device', '')}"
+        elif t == "telegram" and ch.get("token") and "api.telegram.org" not in url:
+            url = f"https://api.telegram.org/bot{ch['token']}/sendMessage"
+        headers, body = self._payload(ch, url, item)
+        req = urllib.request.Request(
+            url, data=json.dumps(body).encode(), headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read(1024)
+
+    def notify(self, item: Dict):
+        """Queue a notification. item: {event, severity, message, rule_id, when}"""
+        try:
+            self._q.put_nowait(item)
+        except queue.Full:
+            logger.warning("Webhook queue full, dropping notification")
+
+
+webhooks = WebhookNotifier()
+
+
+def webhook_notify_alert(a: Dict, event: str):
+    """Fire a webhook for a triggered/resolved alert, honoring cooldown.
+
+    Called from the sampler thread; must never raise or block.
+    """
+    try:
+        cfg = _load_webhook_cfg()
+        if not cfg.get("enabled"):
+            return
+        rid = a.get("rule_id", "")
+        cooldown = int(cfg.get("cooldown_s", 3600))
+        now = time.time()
+        with webhooks._lock:
+            last_ts = cfg.get("last", {}).get(rid, 0)
+            if now - last_ts < cooldown:
+                return
+            cfg.setdefault("last", {})[rid] = now
+            # Cap the dedup map.
+            if len(cfg["last"]) > 200:
+                for k in sorted(cfg["last"], key=cfg["last"].get)[:100]:
+                    del cfg["last"][k]
+            _save_webhook_cfg(cfg)
+        webhooks.notify({
+            "event": event,
+            "severity": a.get("severity", "warning"),
+            "message": a.get("message", ""),
+            "rule_id": rid,
+            "when": now_iso(),
+        })
+    except Exception as e:
+        logger.debug(f"webhook_notify_alert skipped: {e}")
 
 
 def build_alert_checks(snap: Dict, smart: Dict) -> List[Dict]:
@@ -1616,10 +1870,8 @@ def _sampler_loop():
     # prime rate snapshots
     _get_network_snapshot()
     _get_storage_snapshot()
-    time.sleep(SAMPLE_INTERVAL)
-    while True:
+    while not _shutdown.wait(SAMPLE_INTERVAL):
         _sample_once()
-        time.sleep(SAMPLE_INTERVAL)
 
 
 def _gpu_sampler_loop():
@@ -1631,7 +1883,8 @@ def _gpu_sampler_loop():
                 _gpu_cache["time"] = time.time()
         except Exception as e:
             logger.warning(f"GPU sample failed: {e}", exc_info=DEBUG)
-        time.sleep(GPU_SAMPLE_INTERVAL)
+        if _shutdown.wait(GPU_SAMPLE_INTERVAL):
+            break
 
 
 def _smart_loop():
@@ -1640,7 +1893,8 @@ def _smart_loop():
             _collect_smart()
         except Exception as e:
             logger.warning(f"SMART sample failed: {e}", exc_info=DEBUG)
-        time.sleep(SMART_TTL)
+        if _shutdown.wait(SMART_TTL):
+            break
 
 
 # ── Processes (on-demand, CPU% via /proc time deltas) ───────────────────
@@ -1833,16 +2087,26 @@ def get_self_stats() -> Dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"System Monitor v4 starting on {HOST}:{PORT} (auth configured: {auth_configured()})")
-    t1 = threading.Thread(target=_sampler_loop, daemon=True, name="sampler")
-    t2 = threading.Thread(target=_gpu_sampler_loop, daemon=True, name="gpu-sampler")
-    t3 = threading.Thread(target=_smart_loop, daemon=True, name="smart-sampler")
-    t1.start(); t2.start(); t3.start()
+    threads = [
+        threading.Thread(target=_sampler_loop, daemon=True, name="sampler"),
+        threading.Thread(target=_gpu_sampler_loop, daemon=True, name="gpu-sampler"),
+        threading.Thread(target=_smart_loop, daemon=True, name="smart-sampler"),
+    ]
+    for t in threads:
+        t.start()
     get_processes(limit=1)  # prime process CPU% baseline
     yield
+    # Graceful shutdown: stop sampler threads, flush pending state.
+    _shutdown.set()
+    for t in threads:
+        t.join(timeout=5)
     logger.info("System Monitor v4 stopped")
 
 
 app = FastAPI(title="System Performance Monitor", version=VERSION, lifespan=lifespan)
+
+# Compress responses >500 bytes (dashboard HTML, process lists, logs).
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 
 @app.exception_handler(Exception)
@@ -1894,19 +2158,31 @@ class UserRoleChange(BaseModel):
 
 
 @app.post("/api/auth/setup")
-def auth_setup(body: Credentials):
+def auth_setup(body: Credentials, request: Request):
+    ip = request.client.host if request.client else "?"
+    key = f"{ip}:setup"
+    setup_limiter.check(key)
+    setup_limiter.record(key)
     username = body.username.strip()
     password = body.password
     if not re.fullmatch(r"[A-Za-z0-9._-]{2,32}", username):
         raise HTTPException(400, "Username must be 2-32 chars: letters, digits, . _ -")
     if len(password) < 8:
         raise HTTPException(400, "Password must be at least 8 characters")
-    return create_admin(username, password)
+    result = create_admin(username, password)
+    setup_limiter.clear(key)  # success: reset the window
+    return result
 
 
 @app.post("/api/auth/login")
-def auth_login(body: Credentials):
-    return login(body.username, body.password)
+def auth_login(body: Credentials, request: Request):
+    ip = request.client.host if request.client else "?"
+    key = f"{ip}:{body.username.strip().lower()}"
+    login_limiter.check(key)
+    login_limiter.record(key)
+    result = login(body.username, body.password)
+    login_limiter.clear(key)  # success: reset the window
+    return result
 
 
 @app.post("/api/auth/logout")
@@ -2166,6 +2442,105 @@ async def api_alert_clear_resolved():
     return {"cleared": alerts.clear_resolved()}
 
 
+# ── Webhook notification config (admin) ─────────────────────────────────
+WEBHOOK_TYPES = ("bark", "telegram", "dingtalk", "wecom", "generic")
+WEBHOOK_SEVERITIES = ("info", "warning", "danger")
+
+
+class WebhookChannel(BaseModel):
+    type: str = "generic"
+    url: str = ""
+    token: str = ""      # telegram bot token (or api key)
+    device: str = ""     # bark device key
+    min_severity: str = "warning"
+
+
+class WebhookConfig(BaseModel):
+    enabled: bool = False
+    channels: List[WebhookChannel] = []
+    cooldown_s: int = 3600
+
+
+@app.get("/api/webhooks", dependencies=[Depends(require_auth)])
+async def webhooks_get():
+    return _webhook_public(_load_webhook_cfg())
+
+
+@app.put("/api/webhooks", dependencies=[Depends(require_admin)])
+async def webhooks_put(body: WebhookConfig):
+    cfg = _load_webhook_cfg()
+    channels = []
+    for ch in body.channels:
+        t = ch.type.strip().lower()
+        if t not in WEBHOOK_TYPES:
+            raise HTTPException(400, f"Unknown channel type: {ch.type}")
+        sev = ch.min_severity.strip().lower() or "warning"
+        if sev not in WEBHOOK_SEVERITIES:
+            raise HTTPException(400, f"Unknown severity: {ch.min_severity}")
+        # Preserve existing secrets when the client omits them. The dashboard
+        # loads a masked config (empty url/token/device) and re-sends it on save,
+        # so an empty value means "keep what's already stored" — otherwise a
+        # plain save would wipe the stored URL/token.
+        old = next((c for c in cfg.get("channels", []) if c.get("type") == t), {})
+        channels.append({
+            "type": t,
+            "url": (ch.url or "").strip() or old.get("url", ""),
+            "token": (ch.token or "").strip() or old.get("token", ""),
+            "device": (ch.device or "").strip() or old.get("device", ""),
+            "min_severity": sev,
+        })
+    cfg["enabled"] = bool(body.enabled)
+    cfg["channels"] = channels
+    cfg["cooldown_s"] = max(0, min(int(body.cooldown_s), 86400))
+    _save_webhook_cfg(cfg)
+    return _webhook_public(cfg)
+
+
+@app.post("/api/webhooks/test", dependencies=[Depends(require_auth)])
+async def webhooks_test():
+    """Send a test notification through all configured channels (sync, short)."""
+    cfg = _load_webhook_cfg()
+    results = []
+    for ch in cfg.get("channels", []):
+        url = ch.get("url", "")
+        if not url:
+            results.append({"type": ch.get("type"), "ok": False, "error": "no url configured"})
+            continue
+        try:
+            webhooks._deliver(ch, url, {
+                "event": "test", "severity": "warning",
+                "message": "Test notification from System Monitor",
+                "rule_id": "test", "when": now_iso(),
+            })
+            results.append({"type": ch.get("type"), "ok": True})
+        except Exception as e:
+            results.append({"type": ch.get("type"), "ok": False, "error": str(e)[:200]})
+    return {"results": results}
+
+
+# ── Process kill (admin) ────────────────────────────────────────────────
+class ProcessKill(BaseModel):
+    pid: int
+    sig: int = 15  # SIGTERM
+
+
+@app.post("/api/processes/kill", dependencies=[Depends(require_admin)])
+async def api_process_kill(body: ProcessKill):
+    """Terminate a process. sig 15 (SIGTERM, default) or 9 (SIGKILL)."""
+    sig = body.sig if body.sig in (15, 9) else 15
+    try:
+        p = psutil.Process(body.pid)
+        name = p.name()
+        p.send_signal(sig)
+    except psutil.NoSuchProcess:
+        raise HTTPException(404, f"Process {body.pid} not found")
+    except psutil.AccessDenied:
+        raise HTTPException(403, "Permission denied (run as root to kill this process)")
+    except Exception as e:
+        raise HTTPException(500, f"Kill failed: {e}")
+    return {"ok": True, "pid": body.pid, "name": name, "sig": sig}
+
+
 # ── Debug ───────────────────────────────────────────────────────────────
 if DEBUG:
     @app.get("/api/all", dependencies=[Depends(require_auth)])
@@ -2194,6 +2569,19 @@ def _load_dashboard() -> str:
 
 
 DASHBOARD_HTML = _load_dashboard()
+
+
+@app.get("/sw.js", include_in_schema=False)
+async def service_worker():
+    """Service worker (PWA offline support). Must be served at the root
+    scope and NOT gzip-compressed (some browsers reject compressed SW)."""
+    p = Path(__file__).resolve().parent / "sw.js"
+    try:
+        body = p.read_text()
+    except Exception:
+        return JSONResponse({"error": "sw.js missing"}, status_code=404)
+    return Response(content=body, media_type="application/javascript; charset=utf-8",
+                    headers={"Cache-Control": "no-cache"})
 
 
 if __name__ == "__main__":

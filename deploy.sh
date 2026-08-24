@@ -119,7 +119,7 @@ fi
 # Install files
 info "Installing to $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR"
-cp server.py dashboard.html monitor-cli.py "$INSTALL_DIR/"
+cp server.py dashboard.html monitor-cli.py sw.js "$INSTALL_DIR/"
 cp -r *.service "$INSTALL_DIR/" 2>/dev/null || true
 
 # Migrate data (users/keys/alerts) from a previous install location

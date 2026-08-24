@@ -5,6 +5,9 @@
 <title>System Monitor</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E">
+<link rel="manifest" href='data:application/manifest+json,{"name":"System Monitor","short_name":"SysMon","start_url":".","display":"standalone","background_color":"%230a0e14","theme_color":"%230a0e14","icons":[{"src":"data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E","sizes":"any","type":"image/svg+xml"}]}'>
+<meta name="theme-color" content="#0a0e14">
+<meta name="mobile-web-app-capable" content="yes">
 <style>
 :root{
   --bg:#0a0e14;--surface:#0f141e;--card:#111827;--card2:#1a2332;--border:#1e293b;
@@ -68,6 +71,7 @@ input:focus,select:focus{border-color:var(--accent)}
 .tab{padding:9px 14px;font-size:14px;cursor:pointer;border:none;background:transparent;color:var(--muted);border-bottom:2px solid transparent;font-weight:500;white-space:nowrap;transition:color .15s}
 .tab:hover{color:var(--dim)}
 .tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:4px}
 .tab .badge-n{font-size:10px;background:var(--red);color:#fff;border-radius:8px;padding:0 5px;margin-left:4px}
 
 /* ── Content ── */
@@ -263,17 +267,17 @@ td.num,th.num{text-align:right}
 </div>
 <div class="error-banner" id="error-banner"></div>
 
-<div class="tabs" id="tabs">
-  <div class="tab active" data-tab="overview">Overview</div>
-  <div class="tab" data-tab="alerts">Alerts<span class="badge-n" id="tab-alert-badge" style="display:none">0</span></div>
-  <div class="tab" data-tab="cpu">CPU</div>
-  <div class="tab" data-tab="gpu">GPU</div>
-  <div class="tab" data-tab="memory">Memory</div>
-  <div class="tab" data-tab="storage">Storage</div>
-  <div class="tab" data-tab="network">Network</div>
-  <div class="tab" data-tab="temps">Temperatures</div>
-  <div class="tab" data-tab="processes">Processes</div>
-  <div class="tab" data-tab="logs">System Logs</div>
+<div class="tabs" id="tabs" role="tablist" aria-label="Dashboards">
+  <div class="tab active" data-tab="overview" role="tab" tabindex="0" aria-selected="true">Overview</div>
+  <div class="tab" data-tab="alerts" role="tab" tabindex="-1" aria-selected="false">Alerts<span class="badge-n" id="tab-alert-badge" style="display:none">0</span></div>
+  <div class="tab" data-tab="cpu" role="tab" tabindex="-1" aria-selected="false">CPU</div>
+  <div class="tab" data-tab="gpu" role="tab" tabindex="-1" aria-selected="false">GPU</div>
+  <div class="tab" data-tab="memory" role="tab" tabindex="-1" aria-selected="false">Memory</div>
+  <div class="tab" data-tab="storage" role="tab" tabindex="-1" aria-selected="false">Storage</div>
+  <div class="tab" data-tab="network" role="tab" tabindex="-1" aria-selected="false">Network</div>
+  <div class="tab" data-tab="temps" role="tab" tabindex="-1" aria-selected="false">Temperatures</div>
+  <div class="tab" data-tab="processes" role="tab" tabindex="-1" aria-selected="false">Processes</div>
+  <div class="tab" data-tab="logs" role="tab" tabindex="-1" aria-selected="false">System Logs</div>
 </div>
 
 <div class="content">
@@ -293,7 +297,7 @@ td.num,th.num{text-align:right}
   <div class="card">
     <div class="card-header"><h2>Network Activity</h2><span class="badge" id="net-badge">-</span></div>
     <div class="card-body open">
-      <div class="graph-wrap"><canvas id="net-graph" class="graph"></canvas></div>
+      <div class="graph-wrap"><canvas id="net-graph" class="graph" role="img" aria-label="Network throughput chart: download and upload over time"></canvas></div>
       <div class="graph-legend"><span class="lg"><span class="sw" style="background:var(--cyan)"></span>Download</span><span class="lg"><span class="sw" style="background:var(--purple)"></span>Upload</span></div>
       <div class="graph-time"><span data-tl>-</span><span data-tr>-</span></div>
     </div>
@@ -433,7 +437,7 @@ td.num,th.num{text-align:right}
       <th class="num sortable" data-sort="cpu">CPU <span class="arrow" id="arr-cpu">▼</span></th>
       <th class="num sortable" data-sort="mem">MEM <span class="arrow" id="arr-mem"></span></th>
       <th class="num sortable" data-sort="rss_mb">RSS <span class="arrow" id="arr-rss_mb"></span></th>
-      <th>Status</th><th class="num">Uptime</th>
+      <th>Status</th><th class="num">Uptime</th><th id="proc-kill-col" style="display:none">Action</th>
     </tr></thead><tbody id="proc-table"></tbody></table></div></div>
   </div>
 </div>
@@ -494,6 +498,24 @@ td.num,th.num{text-align:right}
           <button class="mini-btn" data-theme-set="dark">Dark</button>
           <button class="mini-btn" data-theme-set="light">Light</button>
         </div>
+      </div>
+    </div>
+    <div class="card" id="webhooks-card" style="display:none">
+      <div class="card-header"><h2>📣 Alert Notifications</h2>
+        <div class="card-actions">
+          <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" id="wh-enabled" style="width:auto"> enabled</label>
+        </div>
+      </div>
+      <div class="card-body open">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Push alerts to your phone / chat when they trigger or resolve. One channel per type; the same alert won't re-notify within the cooldown.</div>
+        <div id="wh-channels"></div>
+        <div class="card-actions" style="margin-top:10px">
+          <span style="font-size:12px;color:var(--muted)">Cooldown</span>
+          <input id="wh-cooldown" type="number" min="0" max="86400" style="width:80px;font-size:12px"> <span style="font-size:12px;color:var(--muted)">s</span>
+          <button class="mini-btn" id="wh-save-btn">Save</button>
+          <button class="mini-btn" id="wh-test-btn">Send test</button>
+        </div>
+        <div class="set-msg" id="wh-msg"></div>
       </div>
     </div>
   </div>
@@ -755,14 +777,32 @@ $('logout-btn').addEventListener('click', async () => {
 // ══════════════════════════════════════════════════════════════════════
 // Tabs
 // ══════════════════════════════════════════════════════════════════════
-function switchTab(tab) {
+function switchTab(tab, focusTab = false) {
   state.tab = tab;
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.tab').forEach(t => {
+    const on = t.dataset.tab === tab;
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', on ? 'true' : 'false');
+    t.tabIndex = on ? 0 : -1;
+    if (on && focusTab) t.focus();
+  });
   document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'panel-' + tab));
   if (tab === 'logs') state._logLast = 0;  // force an initial load on tab entry
   fetchData();
 }
-document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => switchTab(t.dataset.tab)));
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => switchTab(t.dataset.tab));
+  // Keyboard: Enter/Space activate (div-based tabs), arrows move focus.
+  t.addEventListener('keydown', e => {
+    const tabs = Array.from(document.querySelectorAll('.tab'));
+    const i = tabs.indexOf(t);
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); switchTab(t.dataset.tab); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); tabs[(i + 1) % tabs.length].focus(); }
+    else if (e.key === 'ArrowLeft') { e.preventDefault(); tabs[(i - 1 + tabs.length) % tabs.length].focus(); }
+    else if (e.key === 'Home') { e.preventDefault(); tabs[0].focus(); }
+    else if (e.key === 'End') { e.preventDefault(); tabs[tabs.length - 1].focus(); }
+  });
+});
 document.querySelectorAll('.stat.click').forEach(s => s.addEventListener('click', () => switchTab(s.dataset.goto)));
 $('alert-bell').addEventListener('click', () => switchTab('alerts'));
 $('settings-btn').addEventListener('click', () => switchTab('settings'));
@@ -1297,17 +1337,40 @@ function renderTemps(t) {
     `<tr><td>${esc(f.chip)}</td><td>${esc(f.label)}</td><td class="num">${f.rpm}</td><td class="num">${f.max_rpm || '—'}</td></tr>`).join('');
 }
 
+let _procNames = {};  // pid -> name, for kill confirmation (avoids inline quoting)
 function renderProcesses(procs) {
   $('proc-badge').textContent = procs.length + ' shown';
-  $('proc-table').innerHTML = procs.map(p =>
-    `<tr><td>${p.pid}</td><td class="wrap" title="${esc(p.name)}">${esc(p.name)}</td><td>${esc(p.username)}</td>
+  const isAdmin = state.role === 'admin';
+  $('proc-kill-col').style.display = isAdmin ? '' : 'none';
+  _procNames = {};
+  procs.forEach(p => _procNames[p.pid] = p.name);
+  $('proc-table').innerHTML = procs.map(p => {
+    const killBtn = isAdmin
+      ? `<td><button class="mini-btn danger" onclick="killProcess(${p.pid})">Kill</button></td>`
+      : '';
+    return `<tr><td>${p.pid}</td><td class="wrap" title="${esc(p.name)}">${esc(p.name)}</td><td>${esc(p.username)}</td>
      <td class="num">${p.cpu}%</td><td class="num">${p.mem}%</td><td class="num">${p.rss_mb} MB</td>
-     <td><span class="pill muted">${esc(p.status)}</span></td><td class="num">${fmtUptime(p.uptime_s)}</td></tr>`).join('')
-    || '<tr><td colspan="8" class="empty">no matching processes</td></tr>';
+     <td><span class="pill muted">${esc(p.status)}</span></td><td class="num">${fmtUptime(p.uptime_s)}</td>${killBtn}</tr>`;
+  }).join('')
+    || `<tr><td colspan="${isAdmin ? 9 : 8}" class="empty">no matching processes</td></tr>`;
   ['cpu', 'mem', 'rss_mb'].forEach(k => {
     const el = $('arr-' + k);
     if (el) el.textContent = state.procSort === k ? '▼' : '';
   });
+}
+async function killProcess(pid) {
+  const name = _procNames[pid] || `PID ${pid}`;
+  const ok = await showModal({
+    title: 'Terminate process?',
+    body: `Send <code>SIGTERM</code> to <b>${esc(name)}</b> (PID ${pid})?<br>It will try to exit gracefully; use the API with sig=9 for SIGKILL if it won't die.`,
+    okLabel: 'SIGTERM', okDanger: true,
+  });
+  if (!ok) return;
+  try {
+    const r = await api('/api/processes/kill', {method: 'POST', body: JSON.stringify({pid, sig: 15})});
+    console.log('killed', r);
+    fetchData();
+  } catch (e) { alert('Kill failed: ' + e.message); }
 }
 document.querySelectorAll('th.sortable').forEach(th => th.addEventListener('click', () => {
   state.procSort = th.dataset.sort;
@@ -1336,7 +1399,8 @@ async function fetchMe() {
     roleEl.textContent = state.role === 'admin' ? 'Administrator' : 'User';
     roleEl.className = 'pill ' + (state.role === 'admin' ? 'warn' : 'muted');
     $('users-card').style.display = state.role === 'admin' ? 'block' : 'none';
-    if (state.role === 'admin' && state.tab === 'settings') fetchUsers();
+    $('webhooks-card').style.display = state.role === 'admin' ? 'block' : 'none';
+    if (state.role === 'admin' && state.tab === 'settings') { fetchUsers(); fetchWebhooks(); }
   } catch (e) { /* not logged in */ }
 }
 
@@ -1454,6 +1518,87 @@ $('key-create-btn').addEventListener('click', async () => {
     fetchKeys();
   } catch (e) { msg.textContent = e.message; msg.classList.add('err'); }
 });
+
+// ══════════════════════════════════════════════════════════════════════
+// Webhook notifications (admin)
+// ══════════════════════════════════════════════════════════════════════
+const WH_TYPES = [
+  {t: 'bark',     label: 'Bark (iOS push)',     fields: [['url', 'Server URL', 'https://api.day.app'], ['device', 'Device key', 'abc123…']]},
+  {t: 'telegram', label: 'Telegram bot',        fields: [['token', 'Bot token', '123456:ABC-DEF…'], ['url', 'Chat ID (as url)', '123456789']]},
+  {t: 'dingtalk', label: 'DingTalk robot',      fields: [['url', 'Webhook URL', 'https://oapi.dingtalk.com/robot/send?access_token=***']]},
+  {t: 'wecom',    label: 'WeCom (企业微信)',     fields: [['url', 'Webhook URL', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=***']]},
+  {t: 'generic',  label: 'Generic JSON POST',   fields: [['url', 'URL', 'https://example.com/hook']]},
+];
+// Keep full config locally so secrets aren't re-sent (server preserves them).
+let _whCfg = {enabled: false, channels: [], cooldown_s: 3600};
+
+async function fetchWebhooks() {
+  try {
+    const cfg = await api('/api/webhooks');
+    _whCfg.enabled = cfg.enabled;
+    _whCfg.cooldown_s = cfg.cooldown_s;
+    _whCfg.channels = cfg.channels.map(c => ({type: c.type, url: '', token: '', device: '', min_severity: c.min_severity}));
+    renderWebhooks();
+  } catch (e) { /* ignore */ }
+}
+function renderWebhooks() {
+  $('wh-enabled').checked = _whCfg.enabled;
+  $('wh-cooldown').value = _whCfg.cooldown_s;
+  $('wh-channels').innerHTML = WH_TYPES.map(spec => {
+    const ch = _whCfg.channels.find(c => c.type === spec.t) || {type: spec.t, url: '', token: '', device: '', min_severity: 'warning'};
+    const inputs = spec.fields.map(([k, label, ph]) =>
+      `<label style="font-size:12px;color:var(--muted);display:block;margin:6px 0 2px">${label}</label>
+       <input data-wh-type="${spec.t}" data-wh-field="${k}" placeholder="${ph}" style="width:100%;font-size:12px" value="${esc(ch[k] || '')}">`).join('');
+    return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <b style="font-size:13px">${spec.label}</b>
+        <select data-wh-type="${spec.t}" data-wh-field="min_severity" style="font-size:12px;width:auto">
+          ${['info','warning','danger'].map(s => `<option value="${s}" ${ch.min_severity===s?'selected':''}>${s}+</option>`).join('')}
+        </select>
+      </div>${inputs}
+    </div>`;
+  }).join('');
+}
+function collectWebhooks() {
+  const cfg = {enabled: $('wh-enabled').checked, cooldown_s: parseInt($('wh-cooldown').value || '3600', 10), channels: []};
+  // Types that were previously stored (server reported them) — these must be
+  // re-sent even with an empty url so the server preserves their secrets.
+  const previouslyStored = new Set(_whCfg.channels.map(c => c.type));
+  document.querySelectorAll('[data-wh-type]').forEach(el => {
+    const t = el.dataset.whType, f = el.dataset.whField;
+    let ch = cfg.channels.find(c => c.type === t);
+    if (!ch) { ch = {type: t, url: '', token: '', device: '', min_severity: 'warning'}; cfg.channels.push(ch); }
+    if (f === 'min_severity') ch.min_severity = el.value;
+    else ch[f] = el.value.trim();
+  });
+  // Keep a channel if it now has a value, or it was stored before (so the
+  // server can preserve its url/token). This avoids polluting the config with
+  // never-used channel types while protecting configured ones from a wipe.
+  cfg.channels = cfg.channels.filter(c =>
+    c.url || (c.type === 'telegram' && c.token) || previouslyStored.has(c.type));
+  return cfg;
+}
+$('wh-save-btn').addEventListener('click', async () => {
+  const msg = $('wh-msg');
+  msg.className = 'set-msg';
+  try {
+    await api('/api/webhooks', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(collectWebhooks())});
+    msg.textContent = 'Saved ✓'; msg.classList.add('ok');
+    fetchWebhooks();
+  } catch (e) { msg.textContent = e.message; msg.classList.add('err'); }
+});
+$('wh-test-btn').addEventListener('click', async () => {
+  const msg = $('wh-msg');
+  msg.className = 'set-msg';
+  msg.textContent = 'Sending…';
+  try {
+    const r = await api('/api/webhooks/test', {method: 'POST'});
+    const bad = r.results.filter(x => !x.ok);
+    if (!r.results.length) { msg.textContent = 'No channels configured'; msg.classList.add('err'); }
+    else if (bad.length) { msg.textContent = 'Failed: ' + bad.map(x => x.type + ' (' + (x.error||'') + ')').join('; '); msg.classList.add('err'); }
+    else { msg.textContent = 'Test sent to ' + r.results.length + ' channel(s) ✓'; msg.classList.add('ok'); }
+  } catch (e) { msg.textContent = e.message; msg.classList.add('err'); }
+});
 $('pw-change-btn').addEventListener('click', async () => {
   const msg = $('pw-msg');
   msg.className = 'set-msg';
@@ -1512,6 +1657,10 @@ makeGraph('disk-graph', [
 ['net-graph', 'net-graph-2', 'cpu-freq-graph', 'disk-graph'].forEach(id => {
   // drawGraph looks for time-<id>; we use per-graph ids instead
 });
+// PWA: register the service worker (offline shell + API fallback cache).
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 initAuth();
 </script>
 </body>

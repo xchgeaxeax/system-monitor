@@ -36,19 +36,29 @@ A lightweight performance monitor for AI / home servers. Key design:
 
 - 🔐 **多用户认证** — 首次打开创建管理员；管理员可创建/删除/重置密码/升降级普通用户；每个用户可管理自己的 API Key
 - 🔔 **告警面板** — 磁盘/内存/温度/SMART/负载/VRAM 阈值告警，持久化历史；可确认(ack)、删除(保留日志)、清空
+- 📣 **告警推送通知** — Bark / Telegram / 钉钉 / 企业微信 / 通用 Webhook，告警触发与恢复时推送到手机/聊天（可设冷却时间防打扰）
+- 💀 **进程管理** — 管理员可在进程页一键结束进程（SIGTERM，API 支持 SIGKILL）
+- 🛡️ **安全防护** — 登录限流（防暴力破解）、会话上限、PBKDF2(39万次) 密码哈希
 - 🎨 **黑白双主题** — 跟随系统 `prefers-color-scheme` 自动切换，也可手动 深色/浅色/自动
 - 📈 **实时图表** — 网络吞吐、CPU 频率、磁盘 I/O、GPU 利用率/VRAM 曲线（Canvas 自绘，断线 + hover 提示）
 - 🖥️ **全覆盖** — CPU / GPU(ROCm+Intel+sysfs) / 内存 / 存储+SMART / 网络 / 温度 / 进程 / 系统日志
-- ⚡ **高性能** — 采样线程 + 多级缓存（SMART 60s、工具探测 5min），历史按时间窗口裁剪；系统日志默认不轮询（手动刷新或勾选 auto 每 5s 刷新），避免频繁 spawn journalctl
+- ⚡ **高性能** — 采样线程 + 多级缓存（SMART 60s、工具探测 5min），历史按时间窗口裁剪；GZip 压缩响应；系统日志默认不轮询（手动刷新或勾选 auto 每 5s 刷新），避免频繁 spawn journalctl
+- 📱 **PWA** — 可"添加到主屏幕"当 App 用，离线可打开面板（Service Worker 缓存）
+- ♿ **可访问性** — 标签页支持键盘导航（方向键/Home/End）与 ARIA 标注
 - 🪶 **自我监控** — 概览页显示本工具自身 CPU / 内存 / 线程数（实测空闲约 1% CPU、~66 MB 内存）；无对应 GPU 时自动跳过厂商工具
 - 🔧 **命令行管理** — `monitor-cli.py`：用户、密码、API Key、告警
 
 - 🔐 **Multi-user auth** — first-run admin setup; admins create/delete/reset/demote regular users; each user manages their own API keys
 - 🔔 **Alert panel** — disk/memory/temp/SMART/load/VRAM threshold alerts, persistent history; acknowledge / delete / clear
+- 📣 **Push notifications** — Bark / Telegram / DingTalk / WeCom / generic webhook; alerts push to your phone/chat on trigger & resolve (configurable cooldown)
+- 💀 **Process management** — admins can terminate processes from the process tab (SIGTERM; API supports SIGKILL)
+- 🛡️ **Security** — login rate limiting (brute-force protection), session cap, PBKDF2(390k) password hashing
 - 🎨 **Dark & light theme** — follows `prefers-color-scheme`, or manual dark/light/auto
 - 📈 **Live charts** — network throughput, CPU frequency, disk I/O, GPU utilization/VRAM (custom Canvas, gap-aware + hover tooltip)
 - 🖥️ **Full coverage** — CPU / GPU (ROCm+Intel+sysfs) / memory / storage+SMART / network / temps / processes / system logs
-- ⚡ **High performance** — sampler thread + multi-level caching (SMART 60s, tool probe 5min), time-windowed history; system logs don't poll by default (manual refresh or opt-in "auto" every 5s) to avoid spawning journalctl constantly
+- ⚡ **High performance** — sampler thread + multi-level caching (SMART 60s, tool probe 5min), time-windowed history; GZip-compressed responses; system logs don't poll by default (manual refresh or opt-in "auto" every 5s)
+- 📱 **PWA** — "Add to Home Screen" as an app; opens offline (Service Worker cache)
+- ♿ **Accessible** — keyboard-navigable tabs (arrows/Home/End) + ARIA labels
 - 🪶 **Self-monitoring** — the overview shows the tool's own CPU / RSS / threads (measured ~1% CPU, ~66 MB RSS idle); GPU sampler skips vendor tools when no such GPU is present
 - 🔧 **CLI management** — `monitor-cli.py`: users, passwords, API keys, alerts
 
@@ -164,6 +174,9 @@ Web login uses `Authorization: Bearer <session token>` (the browser carries it a
 | AI_MONITOR_HISTORY_WINDOW | 300 | 历史曲线保留时长（秒）/ history window (s) |
 | AI_MONITOR_SMART_TTL | 60 | SMART 采集缓存（秒）/ SMART cache (s) |
 | AI_MONITOR_SESSION_TTL | 43200 | Web 会话有效期（秒）/ session TTL (s) |
+| AI_MONITOR_LOGIN_RATE_LIMIT | 5 | 登录限流：每窗口最大尝试次数（0=关闭）/ login attempts per window (0=off) |
+| AI_MONITOR_LOGIN_RATE_WINDOW | 60 | 登录限流窗口（秒）/ login rate window (s) |
+| AI_MONITOR_MAX_SESSIONS | 500 | 最大并发 Web 会话数（超出淘汰最旧）/ max concurrent sessions |
 | AI_MONITOR_ROCM_SMI | rocm-smi | ROCm SMI 路径 |
 | AI_MONITOR_INTEL_GPU_TOP | intel_gpu_top | Intel GPU Top 路径 |
 | AI_MONITOR_SMARTCTL | smartctl | smartctl 路径 |
@@ -190,6 +203,10 @@ Web login uses `Authorization: Bearer <session token>` (the browser carries it a
 | `/api/alerts/active?rule_id=` (DELETE) | 删除告警 / delete alert | 需要 auth |
 | `/api/alerts/history/{i}` (DELETE) | 删除历史条目 / delete history | 需要 auth |
 | `/api/alerts/clear-resolved` (POST) | 清空已解决 / clear resolved | 需要 auth |
+| `/api/webhooks` (GET) | 通知配置（脱敏）/ webhook config (masked) | 需要 auth |
+| `/api/webhooks` (PUT) | 保存通知配置 / save webhook config | 仅管理员 admin |
+| `/api/webhooks/test` (POST) | 发送测试通知 / send test notification | 需要 auth |
+| `/api/processes/kill` (POST) | 结束进程 `{pid, sig}` / kill process | 仅管理员 admin |
 | `/api/users` (GET/POST) | 列出 / 创建用户 / list/create users | 仅管理员 admin |
 | `/api/users/{user}` (DELETE) | 删除用户 / delete user | 仅管理员 admin |
 | `/api/users/{user}/password` (POST) | 重置用户密码 / reset password | 仅管理员 admin |
@@ -213,6 +230,25 @@ Web login uses `Authorization: Bearer <session token>` (the browser carries it a
 
 告警自动触发 / 自动恢复（数据源缺失时不会误报恢复）。手动添加的告警为固定告警，只能手动删除。
 Alerts auto-trigger / auto-resolve (no false resolution when a data source is missing). Manually added alerts are pinned and can only be removed manually.
+
+## 告警推送通知 / Alert Notifications
+
+在 **设置 → Alert Notifications** 里配置（仅管理员）。支持：
+
+| 类型 / Type | 说明 / Notes |
+|------|------|
+| Bark | iOS 推送。填 Server URL（如 `https://api.day.app`）+ Device key |
+| Telegram | 填 Bot token + Chat ID。需要服务器能访问 `api.telegram.org` |
+| DingTalk | 钉钉机器人 Webhook URL |
+| WeCom | 企业微信群机器人 Webhook URL |
+| Generic | 任意 JSON POST，body 为 `{event, severity, message, rule_id, host, when}` |
+
+- 每条告警在 **冷却时间（cooldown）** 内只推送一次，防止刷屏；触发与恢复都会推送。
+- 每个类型一个通道；`min_severity` 控制最低推送级别（info/warning/danger）。
+- 配置保存在 `data/webhook.json`，URL/token 读取时脱敏（不回显）。
+- 通知在后台线程发送，不阻塞采样与 API。
+
+Configure under **Settings → Alert Notifications** (admin only). Each alert pushes once per cooldown window, on both trigger and resolve. Config lives in `data/webhook.json`; URLs/tokens are masked when read back. Delivery happens on a background thread so it never blocks sampling or the API.
 
 ## 系统要求 / Requirements
 
