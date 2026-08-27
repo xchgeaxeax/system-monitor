@@ -35,3 +35,22 @@ jobs:
 
       - name: Shell syntax check
         run: bash -n deploy.sh
+
+  frontend:
+    # The dashboard is a single 1700-line HTML file with ~1150 lines of inline
+    # JS. A syntax error there ships silently (the page loads, then every
+    # handler throws). node --check catches it without a browser. ubuntu-latest
+    # ships Node, so no setup step is needed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check (inline dashboard JS + service worker)
+        run: |
+          # Extract the single inline <script> block and check it.
+          awk '/<script>/{f=1;next} /<\/script>/{f=0} f' dashboard.html > /tmp/dashboard.js
+          test -s /tmp/dashboard.js || { echo "no inline JS extracted"; exit 1; }
+          node --check /tmp/dashboard.js
+          node --check sw.js
+          echo "dashboard.html inline JS: OK"
+          echo "sw.js: OK"
