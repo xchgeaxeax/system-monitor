@@ -94,6 +94,17 @@ COMPRESS_ENCODINGS = [e.strip() for e in os.getenv("AI_MONITOR_COMPRESS", "zstd,
 COMPRESS_MIN_SIZE = int(os.getenv("AI_MONITOR_COMPRESS_MIN_SIZE", "500"))
 ZSTD_LEVEL = int(os.getenv("AI_MONITOR_ZSTD_LEVEL", "6"))
 GZIP_LEVEL = int(os.getenv("AI_MONITOR_GZIP_LEVEL", "6"))
+# Alert thresholds (build_alert_checks). Defaults match long-standing
+# behavior; tune per-machine if, e.g., a build box legitimately runs hot.
+ALERT_DISK_PCT = int(os.getenv("AI_MONITOR_ALERT_DISK_PCT", "90"))
+ALERT_DISK_DANGER_PCT = int(os.getenv("AI_MONITOR_ALERT_DISK_DANGER_PCT", "95"))
+ALERT_MEM_PCT = int(os.getenv("AI_MONITOR_ALERT_MEM_PCT", "90"))
+ALERT_MEM_DANGER_PCT = int(os.getenv("AI_MONITOR_ALERT_MEM_DANGER_PCT", "95"))
+ALERT_SWAP_PCT = int(os.getenv("AI_MONITOR_ALERT_SWAP_PCT", "80"))
+ALERT_LOAD_RATIO = float(os.getenv("AI_MONITOR_ALERT_LOAD_RATIO", "2"))
+ALERT_TEMP_CRIT_FRAC = float(os.getenv("AI_MONITOR_ALERT_TEMP_CRIT_FRAC", "0.9"))
+ALERT_VRAM_PCT = int(os.getenv("AI_MONITOR_ALERT_VRAM_PCT", "95"))
+ALERT_SMART_LIFE_PCT = int(os.getenv("AI_MONITOR_ALERT_SMART_LIFE_PCT", "90"))
 # Graceful shutdown: set on SIGTERM/SIGINT so sampler threads can exit
 # cleanly instead of being killed mid-write.
 _shutdown = threading.Event()
@@ -503,11 +514,31 @@ _DUMMY_HASH = _hash_password("system-monitor-dummy-password", _DUMMY_SALT)
 _DUMMY_USER = {"salt": _DUMMY_SALT.hex(), "hash": _DUMMY_HASH}
 
 
+# Parsed-auth cache keyed by file mtime (nanoseconds). Every API request
+# resolves its token through _load_auth(); with 500 sessions that's a 40KB
+# read+parse per request. Same pattern as AlertManager._reload_if_changed:
+# cheap stat per call, full parse only when the file actually changed
+# (including edits made by monitor-cli.py). Callers hold _auth_lock and
+# mutate-then-save; the cache is refreshed on both load and save, so
+# read-modify-write cycles never see a stale copy.
+_auth_cache: Dict[str, Any] = {"mtime_ns": None, "data": None}
+
+
 def _load_auth() -> Dict:
+    try:
+        mtime_ns = AUTH_FILE.stat().st_mtime_ns
+    except OSError:
+        _auth_cache["mtime_ns"] = None
+        _auth_cache["data"] = None
+        return {}
+    if _auth_cache["data"] is not None and _auth_cache["mtime_ns"] == mtime_ns:
+        return _auth_cache["data"]
     try:
         with open(AUTH_FILE) as f:
             data = json.load(f)
     except Exception:
+        _auth_cache["mtime_ns"] = None
+        _auth_cache["data"] = None
         return {}
     # Migrate v4.0 single-admin format -> multi-user
     if data.get("admin") and not data.get("users"):
@@ -519,6 +550,9 @@ def _load_auth() -> Dict:
         for k in data.get("keys", {}).values():
             k.setdefault("owner", uname)
         _save_auth(data)
+        return _auth_cache["data"] or data
+    _auth_cache["mtime_ns"] = mtime_ns
+    _auth_cache["data"] = data
     return data
 
 
@@ -528,6 +562,15 @@ def _save_auth(data: Dict):
         json.dump(data, f, indent=2)
     os.chmod(tmp, 0o600)
     tmp.replace(AUTH_FILE)
+    # Refresh the cache from what we just wrote so the next read inside the
+    # same lock doesn't re-read the file (and can't miss an external write
+    # that lands before our stat — the writer would have bumped mtime).
+    try:
+        _auth_cache["mtime_ns"] = AUTH_FILE.stat().st_mtime_ns
+        _auth_cache["data"] = data
+    except OSError:
+        _auth_cache["mtime_ns"] = None
+        _auth_cache["data"] = None
 
 
 def auth_configured() -> bool:
@@ -1073,25 +1116,25 @@ def build_alert_checks(snap: Dict, smart: Dict) -> List[Dict]:
     checks = []
     # Disk usage
     for p in snap.get("partitions", []):
-        if p["percent"] >= 90:
+        if p["percent"] >= ALERT_DISK_PCT:
             checks.append({
                 "rule_id": f"disk_full:{p['mountpoint']}",
                 "family": "core",
-                "severity": "danger" if p["percent"] >= 95 else "warning",
+                "severity": "danger" if p["percent"] >= ALERT_DISK_DANGER_PCT else "warning",
                 "message": f"Disk {p['mountpoint']} at {p['percent']}% ({p['used_gb']}/{p['total_gb']} GB)",
                 "active": True,
             })
     # Memory
-    if snap.get("mem_percent", 0) >= 90:
+    if snap.get("mem_percent", 0) >= ALERT_MEM_PCT:
         checks.append({
             "rule_id": "mem_high",
             "family": "core",
-            "severity": "danger" if snap["mem_percent"] >= 95 else "warning",
+            "severity": "danger" if snap["mem_percent"] >= ALERT_MEM_DANGER_PCT else "warning",
             "message": f"Memory at {snap['mem_percent']}% ({snap.get('mem_used_gb', 0)}/{snap.get('mem_total_gb', 0)} GB)",
             "active": True,
         })
     # Swap
-    if snap.get("swap_percent", 0) >= 80:
+    if snap.get("swap_percent", 0) >= ALERT_SWAP_PCT:
         checks.append({
             "rule_id": "swap_high",
             "family": "core",
@@ -1100,7 +1143,7 @@ def build_alert_checks(snap: Dict, smart: Dict) -> List[Dict]:
             "active": True,
         })
     # Load
-    if snap.get("load_ratio", 0) >= 2:
+    if snap.get("load_ratio", 0) >= ALERT_LOAD_RATIO:
         checks.append({
             "rule_id": "load_high",
             "family": "core",
@@ -1111,7 +1154,7 @@ def build_alert_checks(snap: Dict, smart: Dict) -> List[Dict]:
     # Temperatures
     for s in snap.get("temps", []):
         crit = s.get("crit_c", 0)
-        if crit > 0 and s["temp_c"] > crit * 0.9:
+        if crit > 0 and s["temp_c"] > crit * ALERT_TEMP_CRIT_FRAC:
             checks.append({
                 "rule_id": f"temp_high:{s['chip']}:{s['label']}",
                 "family": "core",
@@ -1129,7 +1172,7 @@ def build_alert_checks(snap: Dict, smart: Dict) -> List[Dict]:
                 "message": f"SMART health issue on {dev} ({d.get('model', '')}): {d['health']}",
                 "active": True,
             })
-        elif d.get("percentage_used") is not None and d["percentage_used"] >= 90:
+        elif d.get("percentage_used") is not None and d["percentage_used"] >= ALERT_SMART_LIFE_PCT:
             checks.append({
                 "rule_id": f"smart_life:{dev}",
                 "family": "smart",
@@ -1139,7 +1182,7 @@ def build_alert_checks(snap: Dict, smart: Dict) -> List[Dict]:
             })
     # GPU VRAM
     for g in snap.get("gpus", []):
-        if g.get("vram_percent", 0) >= 95:
+        if g.get("vram_percent", 0) >= ALERT_VRAM_PCT:
             checks.append({
                 "rule_id": f"vram_high:{g.get('id', g.get('name', ''))}",
                 "family": "gpu",
@@ -1964,13 +2007,14 @@ def _smart_loop():
 
 
 # ── Processes (on-demand, CPU% via /proc time deltas) ───────────────────
-_proc_cpu_last: Dict[int, float] = {}  # pid -> (user + system) seconds
+_proc_cpu_last: Dict[int, tuple] = {}  # pid -> (create_time, user+system seconds)
 _proc_last_time: float = 0.0
 
 
 def get_processes(sort_by: str = "cpu", search: str = "", limit: int = 50) -> List[Dict]:
     global _proc_last_time
     procs = []
+    seen_pids = set()
     now = time.time()
     dt = now - _proc_last_time if _proc_last_time else 0
     _proc_last_time = now
@@ -1980,22 +2024,26 @@ def get_processes(sort_by: str = "cpu", search: str = "", limit: int = 50) -> Li
                  "create_time", "username", "cpu_times"]):
             try:
                 info = p.info
+                seen_pids.add(info["pid"])
                 mem = info["memory_percent"] or 0
                 rss = (info["memory_info"].rss if info["memory_info"] else 0)
                 if mem < 0.3 and rss < 50 * 1024 * 1024:
                     continue
 
-                # CPU% from time deltas between successive scans
+                # CPU% from time deltas between successive scans. The entry
+                # is keyed (pid, create_time): if a PID was reused by a new
+                # process, create_time differs and the delta starts fresh
+                # instead of attributing the dead process's time to the new one.
                 cpu = 0.0
                 ct = info["cpu_times"]
                 if ct:
                     cur = ct.user + ct.system
                     prev = _proc_cpu_last.get(info["pid"])
-                    if prev is not None and dt > 0.2 and cur >= prev:
-                        cpu = min((cur - prev) / dt * 100, 100.0)
-                    _proc_cpu_last[info["pid"]] = cur
-                if len(_proc_cpu_last) > 5000:
-                    _proc_cpu_last.clear()
+                    ct_create = info["create_time"] or 0
+                    if (prev is not None and prev[0] == ct_create
+                            and dt > 0.2 and cur >= prev[1]):
+                        cpu = min((cur - prev[1]) / dt * 100, 100.0)
+                    _proc_cpu_last[info["pid"]] = (ct_create, cur)
 
                 name = (info["name"] or "")[:50]
                 cmdline = info.get("cmdline") or []
@@ -2017,6 +2065,12 @@ def get_processes(sort_by: str = "cpu", search: str = "", limit: int = 50) -> Li
                 })
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
+        # Drop baselines for processes that no longer exist (bounded growth,
+        # and no zeroing-out of every CPU% like the old >5000 bulk clear
+        # did). Inside the try: only runs when the scan completed, so a
+        # partial scan can't wipe baselines it didn't get to observe.
+        for gone in _proc_cpu_last.keys() - seen_pids:
+            del _proc_cpu_last[gone]
     except Exception as e:
         logger.warning(f"Process scan failed: {e}")
 
@@ -2641,6 +2695,15 @@ async def webhooks_get():
 async def webhooks_put(body: WebhookConfig):
     cfg = _load_webhook_cfg()
     channels = []
+    # Secrets-preservation map: for each type, a positional list of stored
+    # channels. Matching by position (the k-th new "bark" inherits from the
+    # k-th stored "bark") is deterministic even when the config holds
+    # multiple channels of the same type — matching by type alone would
+    # make every duplicate inherit the first one's url/token.
+    old_by_type: Dict[str, List[Dict]] = {}
+    for c in cfg.get("channels", []):
+        old_by_type.setdefault(c.get("type", ""), []).append(c)
+    seen_count: Dict[str, int] = {}
     for ch in body.channels:
         t = ch.type.strip().lower()
         if t not in WEBHOOK_TYPES:
@@ -2652,7 +2715,10 @@ async def webhooks_put(body: WebhookConfig):
         # loads a masked config (empty url/token/device) and re-sends it on save,
         # so an empty value means "keep what's already stored" — otherwise a
         # plain save would wipe the stored URL/token.
-        old = next((c for c in cfg.get("channels", []) if c.get("type") == t), {})
+        k = seen_count.get(t, 0)
+        seen_count[t] = k + 1
+        old_list = old_by_type.get(t, [])
+        old = old_list[k] if k < len(old_list) else {}
         channels.append({
             "type": t,
             "url": (ch.url or "").strip() or old.get("url", ""),

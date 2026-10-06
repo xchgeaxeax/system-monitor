@@ -11,6 +11,13 @@ Restart=on-failure
 RestartSec=5
 MemoryMax=128M
 LimitNOFILE=1024
+# Low-risk hardening: none of these affect reading /proc + /sys, writing the
+# data dir under /opt, or spawning smartctl/journalctl helpers.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelModules=true
+ProtectControlGroups=true
 Environment=AI_MONITOR_PORT=9527
 # Bind to loopback when behind a reverse proxy (Caddy/nginx); use 0.0.0.0 for direct access
 Environment=AI_MONITOR_HOST=127.0.0.1

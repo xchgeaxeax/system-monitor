@@ -13,6 +13,15 @@ User=root
 # Memory limit (sampler threads keep a small cache; API is on-demand)
 MemoryMax=256M
 LimitNOFILE=2048
+# Low-risk hardening: none of these affect reading /proc + /sys, writing the
+# data dir under /opt, or spawning smartctl/journalctl/nvme helpers.
+# (ProtectHome is intentionally absent: user home dirs are a valid data dir
+# for non-/opt installs.)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelModules=true
+ProtectControlGroups=true
 Environment=AI_MONITOR_PORT=9527
 # Bind to loopback when behind a reverse proxy (Caddy/nginx); use 0.0.0.0 for direct access
 Environment=AI_MONITOR_HOST=127.0.0.1

@@ -188,6 +188,15 @@ Web login uses `Authorization: Bearer <session token>` (the browser carries it a
 | AI_MONITOR_SMARTCTL | smartctl | smartctl 路径 |
 | AI_MONITOR_NVME | nvme | nvme CLI 路径 |
 | AI_MONITOR_JOURNALCTL | journalctl | journalctl 路径 |
+| AI_MONITOR_ALERT_DISK_PCT | 90 | 磁盘告警阈值（%）/ disk alert threshold |
+| AI_MONITOR_ALERT_DISK_DANGER_PCT | 95 | 磁盘危险阈值（%）/ disk danger threshold |
+| AI_MONITOR_ALERT_MEM_PCT | 90 | 内存告警阈值（%）/ memory alert threshold |
+| AI_MONITOR_ALERT_MEM_DANGER_PCT | 95 | 内存危险阈值（%）/ memory danger threshold |
+| AI_MONITOR_ALERT_SWAP_PCT | 80 | swap 告警阈值（%）/ swap alert threshold |
+| AI_MONITOR_ALERT_LOAD_RATIO | 2 | 负载告警（×核心数）/ load alert (x cores) |
+| AI_MONITOR_ALERT_TEMP_CRIT_FRAC | 0.9 | 温度告警（×临界值）/ temp alert (x crit) |
+| AI_MONITOR_ALERT_VRAM_PCT | 95 | 显存告警阈值（%）/ VRAM alert threshold |
+| AI_MONITOR_ALERT_SMART_LIFE_PCT | 90 | SSD 寿命告警阈值（%）/ SSD life alert threshold |
 
 ## API 端点 / API Endpoints
 
