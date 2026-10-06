@@ -509,10 +509,18 @@ td.num,th.num{text-align:right}
     </div>
   </div>
   <div class="card">
-    <div class="card-header"><h2>VRAM &amp; Power</h2></div>
+    <div class="card-header"><h2>VRAM</h2></div>
     <div class="card-body open">
-      <div class="graph-wrap"><canvas id="remote-vram-graph" class="graph small" role="img" aria-label="Remote VRAM usage and power draw over time"></canvas></div>
-      <div class="graph-legend"><span class="lg"><span class="sw" style="background:var(--cyan)"></span>VRAM GB</span><span class="lg"><span class="sw" style="background:var(--red)"></span>Power W</span></div>
+      <div class="graph-wrap"><canvas id="remote-vram-graph" class="graph small" role="img" aria-label="Remote VRAM usage over time"></canvas></div>
+      <div class="graph-legend"><span class="lg"><span class="sw" style="background:var(--cyan)"></span>VRAM GB</span></div>
+      <div class="graph-time"><span>-</span><span>-</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>GPU Power</h2></div>
+    <div class="card-body open">
+      <div class="graph-wrap"><canvas id="remote-power-graph" class="graph small" role="img" aria-label="Remote GPU power draw over time"></canvas></div>
+      <div class="graph-legend"><span class="lg"><span class="sw" style="background:var(--red)"></span>Power W</span></div>
       <div class="graph-time"><span>-</span><span>-</span></div>
     </div>
   </div>
@@ -1846,7 +1854,9 @@ makeGraph('remote-gpu-graph', [
 ]);
 makeGraph('remote-vram-graph', [
   {label: 'VRAM', color: cssVar('--cyan'), fill: true, fmt: v => (v/1024).toFixed(1) + ' GB'},
-  {label: 'Power', color: cssVar('--red'), fmt: v => v.toFixed(0) + ' W'},
+]);
+makeGraph('remote-power-graph', [
+  {label: 'Power', color: cssVar('--red'), fill: true, fmt: v => v.toFixed(0) + ' W'},
 ]);
 makeGraph('remote-tok-graph', [
   {label: 'tok/s', color: cssVar('--green'), fill: true, fmt: v => v.toFixed(1) + ' tok/s'},
@@ -1904,9 +1914,8 @@ function renderRemote(live, stats, hist) {
   // was off; the adaptive gap-break in drawGraph leaves a visible break.
   const col = (k) => rows.filter(r => r[k] != null).map(r => [r.ts, r[k]]);
   setGraphData('remote-gpu-graph', [col('gpu_util'), col('gpu_temp')]);
-  setGraphData('remote-vram-graph', [
-    rows.filter(r => r.gpu_mem_used != null).map(r => [r.ts, r.gpu_mem_used/1048576]),
-    col('gpu_power')]);
+  setGraphData('remote-vram-graph', [col('gpu_mem_used').map(p => [p[0], p[1] / 1048576])]);
+  setGraphData('remote-power-graph', [col('gpu_power')]);
   setGraphData('remote-tok-graph', [col('tok_s')]);
   setGraphData('remote-host-graph', [col('cpu'), col('ram_pct')]);
   setGraphData('remote-req-graph', [col('req_delta'), col('disk_read')]);
