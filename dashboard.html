@@ -299,6 +299,7 @@ td.num,th.num{text-align:right}
   <div class="tab" data-tab="temps" role="tab" tabindex="-1" aria-selected="false">Temperatures</div>
   <div class="tab" data-tab="processes" role="tab" tabindex="-1" aria-selected="false">Processes</div>
   <div class="tab" data-tab="logs" role="tab" tabindex="-1" aria-selected="false">System Logs</div>
+  <div class="tab" data-tab="remote" role="tab" tabindex="-1" aria-selected="false">Remote Monitor</div>
 </div>
 
 <div class="content">
@@ -480,6 +481,67 @@ td.num,th.num{text-align:right}
   </div>
 </div>
 
+<!-- Remote Monitor (long-term store of a remote strata /metrics) -->
+<div class="panel" id="panel-remote">
+  <div class="card">
+    <div class="card-header"><h2>Inference Server</h2>
+      <div class="card-actions">
+        <select id="remote-range" style="font-size:12px" title="Long-term chart window">
+          <option value="1">Last 1h</option>
+          <option value="6">Last 6h</option>
+          <option value="24" selected>Last 24h</option>
+          <option value="72">Last 3d</option>
+          <option value="168">Last 7d</option>
+        </select>
+      </div>
+    </div>
+    <div class="card-body open">
+      <div class="summary-grid" id="remote-stats" style="margin-bottom:10px"></div>
+      <p class="muted" id="remote-note" style="font-size:12px"></p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>GPU Utilization &amp; Temperature</h2></div>
+    <div class="card-body open">
+      <div class="graph-wrap"><canvas id="remote-gpu-graph" class="graph" role="img" aria-label="Remote GPU utilization and temperature over time"></canvas></div>
+      <div class="graph-legend"><span class="lg"><span class="sw" style="background:var(--accent)"></span>GPU util %</span><span class="lg"><span class="sw" style="background:var(--orange)"></span>GPU °C</span></div>
+      <div class="graph-time"><span>-</span><span>-</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>VRAM &amp; Power</h2></div>
+    <div class="card-body open">
+      <div class="graph-wrap"><canvas id="remote-vram-graph" class="graph small" role="img" aria-label="Remote VRAM usage and power draw over time"></canvas></div>
+      <div class="graph-legend"><span class="lg"><span class="sw" style="background:var(--cyan)"></span>VRAM GB</span><span class="lg"><span class="sw" style="background:var(--red)"></span>Power W</span></div>
+      <div class="graph-time"><span>-</span><span>-</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>Generation Speed</h2></div>
+    <div class="card-body open">
+      <div class="graph-wrap"><canvas id="remote-tok-graph" class="graph small" role="img" aria-label="Remote token generation speed over time"></canvas></div>
+      <div class="graph-legend"><span class="lg"><span class="sw" style="background:var(--green)"></span>tok/s</span></div>
+      <div class="graph-time"><span>-</span><span>-</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>Host CPU &amp; RAM</h2></div>
+    <div class="card-body open">
+      <div class="graph-wrap"><canvas id="remote-host-graph" class="graph small" role="img" aria-label="Remote host CPU and RAM usage over time"></canvas></div>
+      <div class="graph-legend"><span class="lg"><span class="sw" style="background:var(--accent)"></span>CPU %</span><span class="lg"><span class="sw" style="background:var(--purple)"></span>RAM %</span></div>
+      <div class="graph-time"><span>-</span><span>-</span></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header"><h2>Requests &amp; Disk Read</h2></div>
+    <div class="card-body open">
+      <div class="graph-wrap"><canvas id="remote-req-graph" class="graph small" role="img" aria-label="Remote inference requests per interval and disk read throughput over time"></canvas></div>
+      <div class="graph-legend"><span class="lg"><span class="sw" style="background:var(--cyan)"></span>Requests</span><span class="lg"><span class="sw" style="background:var(--orange)"></span>Disk MB/s</span></div>
+      <div class="graph-time"><span>-</span><span>-</span></div>
+    </div>
+  </div>
+</div>
+
 <!-- Settings -->
 <div class="panel" id="panel-settings">
   <div class="set-grid">
@@ -607,6 +669,7 @@ const state = {
   _logLast: 0,
   errCount: 0,
   serverDown: false,
+  _remoteLast: 0,
 };
 let refreshTimer = null;
 // Guard against tampered/corrupt localStorage values.
@@ -857,6 +920,8 @@ fillSelect($('hist-select'), HIST_OPTIONS, state.histMin, v => {
 // Server retains 1h; clamp the requested window so the option list and the
 // server's retention can never disagree visually.
 const histQ = () => `?minute=${state.histMin}`;
+// Remote tab: switching the stored-data window must re-query immediately.
+$('remote-range').addEventListener('change', () => { state._remoteLast = 0; fetchData(); });
 $('theme-btn').addEventListener('click', cycleTheme);
 document.querySelectorAll('[data-theme-set]').forEach(b => b.addEventListener('click', () => {
   state.theme = b.dataset.themeSet;
@@ -1154,6 +1219,20 @@ async function fetchData() {
         state._logLoaded = true;
         fetchLogs();
       }
+    }
+  }
+  if (tab === 'remote') {
+    // Long-term store: the scraper writes every 15s server-side, so the
+    // tab only needs a slow refresh (10s) instead of the 1.5s poll.
+    const now = Date.now();
+    if (!state._remoteLast || now - state._remoteLast >= 10000) {
+      state._remoteLast = now;
+      const hrs = $('remote-range').value || '24';
+      Promise.all([
+        api('/api/remote').catch(() => ({ok: false, data: null})),
+        api('/api/remote/stats').catch(() => null),
+        api('/api/remote/history?hours=' + hrs).catch(() => []),
+      ]).then(([live, stats, hist]) => renderRemote(live, stats, hist));
     }
   }
   if (tab === 'settings') { fetchMe(); fetchKeys(); }
@@ -1759,6 +1838,64 @@ makeGraph('disk-graph', [
   {label: '', color: cssVar('--accent'), fmt: v => v + ' MB/s'},
   {label: '', color: cssVar('--red'), fmt: v => v + ' MB/s'},
 ]);
+
+// Remote Monitor graphs (long-term store of the remote strata server).
+makeGraph('remote-gpu-graph', [
+  {label: 'GPU util', color: cssVar('--accent'), fill: true, fmt: v => v.toFixed(0) + ' %', yMax: 100},
+  {label: 'GPU temp', color: cssVar('--orange'), fmt: v => v.toFixed(0) + ' °C', yMax: 100},
+]);
+makeGraph('remote-vram-graph', [
+  {label: 'VRAM', color: cssVar('--cyan'), fill: true, fmt: v => (v/1024).toFixed(1) + ' GB'},
+  {label: 'Power', color: cssVar('--red'), fmt: v => v.toFixed(0) + ' W'},
+]);
+makeGraph('remote-tok-graph', [
+  {label: 'tok/s', color: cssVar('--green'), fill: true, fmt: v => v.toFixed(1) + ' tok/s'},
+]);
+makeGraph('remote-host-graph', [
+  {label: 'CPU', color: cssVar('--accent'), fill: true, fmt: v => v.toFixed(0) + ' %', yMax: 100},
+  {label: 'RAM', color: cssVar('--purple'), fmt: v => v.toFixed(0) + ' %', yMax: 100},
+]);
+makeGraph('remote-req-graph', [
+  {label: 'Requests', color: cssVar('--cyan'), fill: true, fmt: v => v.toFixed(0)},
+  {label: 'Disk read', color: cssVar('--orange'), fmt: v => v.toFixed(1) + ' MB/s'},
+]);
+
+function renderRemote(live, stats, hist) {
+  const statsEl = $('remote-stats');
+  const note = $('remote-note');
+  const d = live && live.data;
+  const hw = d && d.hardware, tot = d && d.totals, liveS = d && d.live;
+  const gpuMemTotal = (hw && hw.gpu_mem_total) || 0;
+  const cells = [];
+  if (hw) {
+    cells.push({h: 'GPU', v: (hw.gpu_util ?? '-') + '%', s: (hw.gpu_temp ?? '-') + '°C · ' + (hw.gpu_power ?? '-') + 'W'});
+    cells.push({h: 'VRAM', v: ((hw.gpu_mem_used/1048576).toFixed(0)) + ' GB', s: gpuMemTotal ? 'of ' + (gpuMemTotal/1048576).toFixed(0) + ' GB' : ''});
+    cells.push({h: 'Host CPU', v: (hw.cpu ?? '-') + '%', s: 'RAM ' + (hw.ram_total ? (hw.ram_used/hw.ram_total*100).toFixed(0) : '-') + '%'});
+    cells.push({h: 'Speed', v: (hw.tok_s ?? '-') + ' tok/s', s: 'avg ' + (hw.tok_s_mean != null ? hw.tok_s_mean.toFixed(1) : '-')});
+  }
+  if (tot) cells.push({h: 'Requests', v: tot.requests ?? '-', s: (tot.output_tokens ?? 0).toLocaleString() + ' tok out'});
+  if (liveS) cells.push({h: 'State', v: (liveS.state || 'idle'), s: liveS.queued ? liveS.queued + ' queued' : ''});
+  statsEl.innerHTML = cells.map(c =>
+    `<div class="stat"><h3>${esc(c.h)}</h3><div class="value">${esc(String(c.v))}</div><div class="sub">${esc(c.s || '')}</div></div>`).join('');
+  if (stats) {
+    const age = stats.last_ts ? Math.round(Date.now()/1000 - stats.last_ts) : null;
+    note.textContent = (live.ok ? 'Scraping ' + stats.url + ' every ' + stats.interval_s + 's' :
+      'Cannot reach ' + stats.url + ' — showing last stored data') +
+      ' · stored rows: ' + stats.rows.toLocaleString() +
+      ' · DB: ' + (stats.size_bytes/1048576).toFixed(1) + ' MB' +
+      ' · retention: ' + Math.round(stats.retention_s/86400) + 'd (old data auto-deleted)' +
+      (age != null && age < 3600 ? ' · last sample ' + age + 's ago' : '');
+  }
+  // Series from history rows (skip nulls per-series).
+  const col = (k) => hist.filter(r => r[k] != null).map(r => [r.ts, r[k]]);
+  setGraphData('remote-gpu-graph', [col('gpu_util'), col('gpu_temp')]);
+  setGraphData('remote-vram-graph', [
+    hist.filter(r => r.gpu_mem_used != null).map(r => [r.ts, r.gpu_mem_used/1048576]),
+    col('gpu_power')]);
+  setGraphData('remote-tok-graph', [col('tok_s')]);
+  setGraphData('remote-host-graph', [col('cpu'), col('ram_pct')]);
+  setGraphData('remote-req-graph', [col('req_delta'), col('disk_read')]);
+}
 // time label ids for graphs
 ['net-graph', 'net-graph-2', 'cpu-freq-graph', 'disk-graph'].forEach(id => {
   // drawGraph looks for time-<id>; we use per-graph ids instead

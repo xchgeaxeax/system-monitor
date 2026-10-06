@@ -32,6 +32,7 @@ def server_mod(tmp_path_factory):
     os.environ["AI_MONITOR_MAX_SESSIONS"] = "3"
     os.environ["AI_MONITOR_LOGIN_RATE_LIMIT"] = "5"
     os.environ["AI_MONITOR_LOGIN_RATE_WINDOW"] = "60"
+    os.environ["AI_MONITOR_REMOTE_URL"] = ""  # no LAN scraping in tests/CI
     if str(REPO) not in sys.path:
         sys.path.insert(0, str(REPO))
     import server  # noqa: E402  (env must be set before import)

@@ -18,6 +18,7 @@ import queue
 import re
 import secrets
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -54,7 +55,7 @@ logging.basicConfig(
 logger = logging.getLogger("ai-monitor")
 
 # ── Config (env overrides) ──────────────────────────────────────────────
-VERSION = "4.4"
+VERSION = "4.5"
 PORT = int(os.getenv("AI_MONITOR_PORT", "9527"))
 HOST = os.getenv("AI_MONITOR_HOST", "0.0.0.0")
 DEBUG = os.getenv("AI_MONITOR_DEBUG", "").lower() in ("1", "true")
@@ -233,6 +234,199 @@ _cpu_freq_history = History()     # (ts, mhz)
 _disk_io_history = History()      # (ts, {disk: (r_mbps, w_mbps)})
 _gpu_history: Dict[str, History] = {}  # gpu_id -> (ts, util, vram_pct, temp)
 _gpu_history_lock = threading.Lock()
+
+# ── Remote monitor: long-term store for a remote strata /metrics ───────
+# The panel at http://<host>:18080/#monitor (a llama.cpp "strata" server)
+# only keeps ~60 points of in-memory history. This feature scrapes its
+# /metrics endpoint over the LAN and persists the key series to
+# DATA_DIR/remote_metrics.sqlite3 with a default 7-day rolling retention:
+# rows older than the window are deleted on every write ("auto-refresh
+# overwrite"), so the DB stays a bounded few MB (7d @15s ≈ 40k rows).
+# SQLite ships with Python — no new dependencies.
+REMOTE_URL = os.getenv("AI_MONITOR_REMOTE_URL", "http://172.16.116.101:18080")
+REMOTE_INTERVAL = float(os.getenv("AI_MONITOR_REMOTE_INTERVAL", "15"))
+LT_RETENTION_S = int(os.getenv("AI_MONITOR_LT_RETENTION", "604800"))  # 7 days
+LT_DB_PATH = DATA_DIR / "remote_metrics.sqlite3"
+LT_MAX_POINTS = int(os.getenv("AI_MONITOR_LT_MAX_POINTS", "2000"))  # per-query cap
+
+_lt_lock = threading.Lock()
+_lt_conn: Optional[sqlite3.Connection] = None
+_remote_live: Dict[str, Any] = {"data": None, "time": 0.0, "ok": False}
+_remote_prev: Dict[str, Any] = {}  # last cumulative totals, for per-interval deltas
+_remote_lock = threading.Lock()
+
+_LT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS remote_metrics (
+  ts REAL PRIMARY KEY,
+  state TEXT, queued REAL,
+  gpu_util REAL, gpu_mem_used REAL, gpu_temp REAL, gpu_power REAL,
+  cpu REAL, ram_pct REAL,
+  disk_read REAL, disk_write REAL,
+  tok_s REAL, tok_s_mean REAL,
+  req_delta REAL, tok_out_delta REAL,
+  requests REAL, prompt_tokens REAL, output_tokens REAL
+);
+"""
+
+
+def _lt_db() -> sqlite3.Connection:
+    """Open (once) and return the long-term DB connection.
+    A single connection in WAL mode is fine: only one writer thread and
+    readers never block on the writer."""
+    global _lt_conn
+    if _lt_conn is None:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _lt_conn = sqlite3.connect(str(LT_DB_PATH), check_same_thread=False)
+        _lt_conn.execute("PRAGMA journal_mode=WAL")
+        _lt_conn.execute("PRAGMA synchronous=NORMAL")
+        _lt_conn.executescript(_LT_SCHEMA)
+        _lt_conn.commit()
+    return _lt_conn
+
+
+_LT_COLS = ["ts", "state", "queued", "gpu_util", "gpu_mem_used", "gpu_temp",
+            "gpu_power", "cpu", "ram_pct", "disk_read", "disk_write",
+            "tok_s", "tok_s_mean", "req_delta", "tok_out_delta",
+            "requests", "prompt_tokens", "output_tokens"]
+
+
+def lt_write(row: Dict[str, Any]):
+    """Insert one metrics row and prune rows older than the retention
+    window. Pruning in the same transaction keeps the DB a strict rolling
+    window without needing cron/vacuum."""
+    try:
+        with _lt_lock:
+            conn = _lt_db()
+            conn.execute(
+                "INSERT OR REPLACE INTO remote_metrics VALUES (" + ",".join("?" * len(_LT_COLS)) + ")",
+                tuple(row.get(c) for c in _LT_COLS),
+            )
+            conn.execute("DELETE FROM remote_metrics WHERE ts < ?", (time.time() - LT_RETENTION_S,))
+            conn.commit()
+    except Exception as e:  # never let persistence break live monitoring
+        logger.warning(f"remote metrics write failed: {e}")
+
+
+def lt_query(hours: float) -> List[Dict[str, Any]]:
+    """Rows from the last `hours` hours, downsampled server-side to at
+    most LT_MAX_POINTS (max-pool by GPU/CPU load buckets, same idea as
+    History.sampled, so spikes survive downsampling)."""
+    cutoff = time.time() - hours * 3600
+    try:
+        with _lt_lock:
+            conn = _lt_db()
+            cur = conn.execute(
+                "SELECT " + ",".join(_LT_COLS) +
+                " FROM remote_metrics WHERE ts >= ? ORDER BY ts ASC", (cutoff,))
+            rows = cur.fetchall()
+    except Exception as e:
+        logger.warning(f"remote metrics query failed: {e}")
+        return []
+    if len(rows) <= LT_MAX_POINTS:
+        return [dict(zip(_LT_COLS, r)) for r in rows]
+    out = []
+    step = max(2, (len(rows) + LT_MAX_POINTS - 1) // LT_MAX_POINTS)
+    bucket: List[tuple] = []
+    for r in rows:
+        bucket.append(r)
+        if len(bucket) >= step:
+            idx = {c: i for i, c in enumerate(_LT_COLS)}
+            best = max(bucket, key=lambda r: (r[idx["gpu_util"]] or 0) + (r[idx["cpu"]] or 0))
+            out.append(dict(zip(_LT_COLS, best)))
+            bucket = []
+    if bucket:
+        out.append(dict(zip(_LT_COLS, bucket[-1])))
+    return out
+
+
+def lt_stats() -> Dict[str, Any]:
+    """DB size / row count / time range / scraper status for the UI footer."""
+    try:
+        with _lt_lock:
+            conn = _lt_db()
+            row = conn.execute("SELECT COUNT(*), MIN(ts), MAX(ts) FROM remote_metrics").fetchone()
+            size = LT_DB_PATH.stat().st_size if LT_DB_PATH.exists() else 0
+    except Exception:
+        row, size = (0, None, None), 0
+    with _remote_lock:
+        scraper = {"ok": _remote_live["ok"], "last_scrape": _remote_live["time"]}
+    return {"rows": row[0], "first_ts": row[1], "last_ts": row[2],
+            "size_bytes": size, "retention_s": LT_RETENTION_S,
+            "interval_s": REMOTE_INTERVAL, "url": REMOTE_URL, **scraper}
+
+
+def _remote_delta(cur: Optional[float], prev: Optional[float]) -> Optional[float]:
+    """Per-interval delta of a cumulative counter. A restart (cur < prev)
+    resets the baseline instead of producing a negative spike."""
+    if cur is None:
+        return None
+    if prev is None or cur < prev:
+        return cur
+    return cur - prev
+
+
+def _remote_parse(data: Dict[str, Any], prev: Dict[str, Any]) -> Dict[str, Any]:
+    """Map a strata /metrics payload onto one remote_metrics row.
+    Pure function (no I/O) so it is unit-testable against recorded payloads."""
+    hw = data.get("hardware") or {}
+    totals = data.get("totals") or {}
+    live = data.get("live") or {}
+    ram_total = hw.get("ram_total") or 0
+    ram_used = hw.get("ram_used")
+    return {
+        "ts": time.time(),
+        "state": (live.get("state") or "unknown")[:16],
+        "queued": live.get("queued"),
+        "gpu_util": hw.get("gpu_util"),
+        "gpu_mem_used": hw.get("gpu_mem_used"),
+        "gpu_temp": hw.get("gpu_temp"),
+        "gpu_power": hw.get("gpu_power"),
+        "cpu": hw.get("cpu"),
+        "ram_pct": round(ram_used / ram_total * 100, 1) if ram_total and ram_used is not None else None,
+        "disk_read": hw.get("disk_read_mb"),
+        "disk_write": hw.get("disk_write_mb"),
+        "tok_s": hw.get("tok_s"),
+        "tok_s_mean": hw.get("tok_s_mean"),
+        "req_delta": _remote_delta(totals.get("requests"), prev.get("requests")),
+        "tok_out_delta": _remote_delta(totals.get("output_tokens"), prev.get("output_tokens")),
+        "requests": totals.get("requests"),
+        "prompt_tokens": totals.get("prompt_tokens"),
+        "output_tokens": totals.get("output_tokens"),
+    }
+
+
+def _remote_scrape_loop():
+    """Poll the remote strata /metrics and persist each sample. The last
+    successful payload is also kept in memory for the live card."""
+    global _remote_prev
+    if not REMOTE_URL:
+        return
+    while not _shutdown.wait(REMOTE_INTERVAL):
+        try:
+            req = urllib.request.Request(REMOTE_URL.rstrip("/") + "/metrics",
+                                        headers={"Accept-Encoding": "gzip"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                raw = resp.read()
+                if resp.headers.get("Content-Encoding") == "gzip":
+                    raw = _gzip.decompress(raw)
+            data = json.loads(raw)
+            with _remote_lock:
+                row = _remote_parse(data, _remote_prev)
+                totals = data.get("totals") or {}
+                _remote_prev = {"requests": totals.get("requests"),
+                                "output_tokens": totals.get("output_tokens")}
+                _remote_live["data"] = {
+                    "live": data.get("live"), "hardware": data.get("hardware"),
+                    "hardware_static": data.get("hardware_static"),
+                    "engine": data.get("engine"), "totals": totals,
+                }
+                _remote_live["time"] = time.time()
+                _remote_live["ok"] = True
+            lt_write(row)
+        except Exception as e:
+            with _remote_lock:
+                _remote_live["ok"] = False
+            logger.debug(f"remote scrape failed: {e}")
 
 # ── GPU topology cache ──────────────────────────────────────────────────
 _gpu_topology: Optional[List[Dict]] = None
@@ -2251,6 +2445,8 @@ async def lifespan(app: FastAPI):
         threading.Thread(target=_gpu_sampler_loop, daemon=True, name="gpu-sampler"),
         threading.Thread(target=_smart_loop, daemon=True, name="smart-sampler"),
     ]
+    if REMOTE_URL:
+        threads.append(threading.Thread(target=_remote_scrape_loop, daemon=True, name="remote-scraper"))
     for t in threads:
         t.start()
     get_processes(limit=1)  # prime process CPU% baseline
@@ -2686,6 +2882,27 @@ def api_cpu_freq_history(minute: int = Query(default=0, ge=0), points: int = Que
 @app.get("/api/disk-io-history", dependencies=[Depends(require_auth)])
 def api_disk_io_history(minute: int = Query(default=0, ge=0), points: int = Query(default=400, ge=50, le=2000)):
     return _disk_io_history.sampled(points, minute * 60)
+
+
+# ── Remote monitor (strata /metrics long-term store) ────────────────────
+@app.get("/api/remote", dependencies=[Depends(require_auth)])
+def api_remote_live():
+    """Latest scraped snapshot (live state, hardware, engine, totals) + scraper status."""
+    with _remote_lock:
+        return {"ok": _remote_live["ok"], "scrape_time": _remote_live["time"],
+                "url": REMOTE_URL, "data": _remote_live["data"]}
+
+
+@app.get("/api/remote/history", dependencies=[Depends(require_auth)])
+def api_remote_history(hours: float = Query(default=1.0, gt=0, le=168)):
+    """Persisted long-term series for the last `hours` (max 168 = 7d),
+    downsampled server-side. Reads are cheap: one indexed range scan."""
+    return lt_query(hours)
+
+
+@app.get("/api/remote/stats", dependencies=[Depends(require_auth)])
+def api_remote_stats():
+    return lt_stats()
 
 
 @app.get("/api/temps", dependencies=[Depends(require_auth)])

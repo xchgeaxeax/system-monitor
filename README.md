@@ -46,6 +46,7 @@ A lightweight performance monitor for AI / home servers. Key design:
 - 📱 **PWA** — 可"添加到主屏幕"当 App 用，离线可打开面板（Service Worker 缓存）
 - ♿ **可访问性** — 标签页支持键盘导航（方向键/Home/End）与 ARIA 标注
 - 🪶 **自我监控** — 概览页显示本工具自身 CPU / 内存 / 线程数（实测空闲约 1% CPU、~66 MB 内存）；无对应 GPU 时自动跳过厂商工具
+- 🌐 **远程监控（strata）** — 抓取局域网推理服务器（llama.cpp strata `/metrics`）的 GPU/温度/功耗/tok/s/请求数等指标，写入 SQLite 长期数据库（默认保留 7 天，旧数据自动删除覆盖）；Remote Monitor 标签页提供 1h/6h/24h/3d/7d 长期曲线
 - 🔧 **命令行管理** — `monitor-cli.py`：用户、密码、API Key、告警
 
 - 🔐 **Multi-user auth** — first-run admin setup; admins create/delete/reset/demote regular users; each user manages their own API keys
@@ -60,6 +61,7 @@ A lightweight performance monitor for AI / home servers. Key design:
 - 📱 **PWA** — "Add to Home Screen" as an app; opens offline (Service Worker cache)
 - ♿ **Accessible** — keyboard-navigable tabs (arrows/Home/End) + ARIA labels
 - 🪶 **Self-monitoring** — the overview shows the tool's own CPU / RSS / threads (measured ~1% CPU, ~66 MB RSS idle); GPU sampler skips vendor tools when no such GPU is present
+- 🌐 **Remote monitor (strata)** — scrapes a LAN inference server's (llama.cpp strata `/metrics`) GPU/temp/power/tok-s/request metrics into a SQLite long-term store (7-day rolling retention, old rows auto-deleted); the Remote Monitor tab charts 1h/6h/24h/3d/7d windows
 - 🔧 **CLI management** — `monitor-cli.py`: users, passwords, API keys, alerts
 
 ## 界面预览 / Screenshots
@@ -198,6 +200,10 @@ Web login uses `Authorization: Bearer <session token>` (the browser carries it a
 | AI_MONITOR_ALERT_TEMP_CRIT_FRAC | 0.9 | 温度告警（×临界值）/ temp alert (x crit) |
 | AI_MONITOR_ALERT_VRAM_PCT | 95 | 显存告警阈值（%）/ VRAM alert threshold |
 | AI_MONITOR_ALERT_SMART_LIFE_PCT | 90 | SSD 寿命告警阈值（%）/ SSD life alert threshold |
+| AI_MONITOR_REMOTE_URL | http://172.16.116.101:18080 | 远程 strata 服务器地址（空=禁用远程监控）/ remote strata base URL (empty = disabled) |
+| AI_MONITOR_REMOTE_INTERVAL | 15 | 远程抓取间隔（秒）/ remote scrape interval (s) |
+| AI_MONITOR_LT_RETENTION | 604800 | 远程数据保留时长（秒，默认 7 天，旧数据自动删除）/ remote data retention (s, default 7d) |
+| AI_MONITOR_LT_MAX_POINTS | 2000 | 长期曲线单次查询点数上限 / max points per long-term query |
 
 ## API 端点 / API Endpoints
 
@@ -212,6 +218,7 @@ Web login uses `Authorization: Bearer <session token>` (the browser carries it a
 | `/api/monitor` | 本工具自身占用（CPU/内存/线程）/ self footprint | 需要 auth |
 | `/api/cpu` · `/gpu` · `/memory` · `/storage` · `/network` · `/temps` | 详情 / details | 需要 auth |
 | `/api/net-history` · `/gpu-history` · `/cpu-freq-history` · `/disk-io-history` | 曲线数据 / chart data | 需要 auth |
+| `/api/remote` · `/api/remote/history?hours=` · `/api/remote/stats` | 远程 strata 实时快照 / 7 天长期曲线 / 存储状态 | 需要 auth |
 | `/api/processes?sort_by=&search=` | 进程 / processes | 需要 auth |
 | `/api/logs?lines=&unit=&search=&level=&noisy=` | 系统日志 / system logs | 需要 auth |
 | `/api/alerts` | 告警快照 / alert snapshot | 需要 auth |
