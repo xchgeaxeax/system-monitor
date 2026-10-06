@@ -12,7 +12,7 @@ STRATA_PAYLOAD = {
         "gpu_temp": 60, "gpu_power": 240.39,
         "cpu": 37.1, "ram_used": 74996867072, "ram_total": 102110724096,
         "disk_read_mb": 4.43, "disk_write_mb": 0.0,
-        "tok_s": 120.76, "tok_s_mean": 97.99,
+        "tok_s": 120.76, "tok_s_mean": 97.99, "prefill_tok_s_mean": 3861.4,
     },
     "hardware_static": {"gpu_name": "RTX 4090 D", "cores": 16},
     "totals": {"requests": 33, "prompt_tokens": 2512939, "output_tokens": 11146},
@@ -29,9 +29,17 @@ def test_remote_parse_maps_fields(server_mod):
     assert row["state"] == "generating"
     assert row["queued"] == 1
     assert row["tok_s"] == 120.76
+    assert row["prefill_tok_s_mean"] == 3861.4
     # first sample: delta of a cumulative counter = the counter itself
     assert row["req_delta"] == 33
     assert row["tok_out_delta"] == 11146
+
+
+def test_remote_parse_prefill_zero_becomes_none(server_mod):
+    # strata reports prefill 0 while idle; storing None keeps the chart
+    # showing gaps instead of fake zeros.
+    payload = {"hardware": {"prefill_tok_s_mean": 0.0}}
+    assert server_mod._remote_parse(payload, {})["prefill_tok_s_mean"] is None
 
 
 def test_remote_parse_handles_missing_sections(server_mod):

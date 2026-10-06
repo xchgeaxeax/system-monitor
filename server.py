@@ -262,7 +262,7 @@ CREATE TABLE IF NOT EXISTS remote_metrics (
   gpu_util REAL, gpu_mem_used REAL, gpu_temp REAL, gpu_power REAL,
   cpu REAL, ram_pct REAL,
   disk_read REAL, disk_write REAL,
-  tok_s REAL, tok_s_mean REAL,
+  tok_s REAL, tok_s_mean REAL, prefill_tok_s_mean REAL,
   req_delta REAL, tok_out_delta REAL,
   requests REAL, prompt_tokens REAL, output_tokens REAL
 );
@@ -284,13 +284,18 @@ def _lt_db() -> sqlite3.Connection:
         _lt_conn.execute("PRAGMA journal_mode=WAL")
         _lt_conn.execute("PRAGMA synchronous=NORMAL")
         _lt_conn.executescript(_LT_SCHEMA)
+        # Schema evolution: CREATE TABLE IF NOT EXISTS won't add columns to a
+        # pre-existing DB, so ALTER for columns introduced after first deploy.
+        cols = {r[1] for r in _lt_conn.execute("PRAGMA table_info(remote_metrics)")}
+        if "prefill_tok_s_mean" not in cols:
+            _lt_conn.execute("ALTER TABLE remote_metrics ADD COLUMN prefill_tok_s_mean REAL")
         _lt_conn.commit()
     return _lt_conn
 
 
 _LT_COLS = ["ts", "state", "queued", "gpu_util", "gpu_mem_used", "gpu_temp",
             "gpu_power", "cpu", "ram_pct", "disk_read", "disk_write",
-            "tok_s", "tok_s_mean", "req_delta", "tok_out_delta",
+            "tok_s", "tok_s_mean", "prefill_tok_s_mean", "req_delta", "tok_out_delta",
             "requests", "prompt_tokens", "output_tokens"]
 
 
@@ -302,7 +307,10 @@ def lt_write(row: Dict[str, Any]):
         with _lt_lock:
             conn = _lt_db()
             conn.execute(
-                "INSERT OR REPLACE INTO remote_metrics VALUES (" + ",".join("?" * len(_LT_COLS)) + ")",
+                # Explicit column list: on migrated DBs the new column sits at
+                # the end of the table, so positional VALUES would mismatch.
+                "INSERT OR REPLACE INTO remote_metrics (" + ",".join(_LT_COLS) + ") VALUES (" +
+                ",".join("?" * len(_LT_COLS)) + ")",
                 tuple(row.get(c) for c in _LT_COLS),
             )
             conn.execute("DELETE FROM remote_metrics WHERE ts < ?", (time.time() - LT_RETENTION_S,))
@@ -399,6 +407,10 @@ def _remote_parse(data: Dict[str, Any], prev: Dict[str, Any]) -> Dict[str, Any]:
         "disk_write": hw.get("disk_write_mb"),
         "tok_s": hw.get("tok_s"),
         "tok_s_mean": hw.get("tok_s_mean"),
+        # Prefill (prompt processing) speed. strata reports 0 while idle;
+        # store None so offline/idle stretches render as gaps, not fake 0s
+        # dragging the chart down.
+        "prefill_tok_s_mean": hw.get("prefill_tok_s_mean") or None,
         "req_delta": _remote_delta(totals.get("requests"), prev.get("requests")),
         "tok_out_delta": _remote_delta(totals.get("output_tokens"), prev.get("output_tokens")),
         "requests": totals.get("requests"),

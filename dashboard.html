@@ -533,6 +533,14 @@ td.num,th.num{text-align:right}
     </div>
   </div>
   <div class="card">
+    <div class="card-header"><h2>Prefill Speed</h2></div>
+    <div class="card-body open">
+      <div class="graph-wrap"><canvas id="remote-prefill-graph" class="graph small" role="img" aria-label="Remote prompt prefill speed over time"></canvas></div>
+      <div class="graph-legend"><span class="lg"><span class="sw" style="background:var(--orange)"></span>prefill tok/s</span></div>
+      <div class="graph-time"><span>-</span><span>-</span></div>
+    </div>
+  </div>
+  <div class="card">
     <div class="card-header"><h2>Host CPU &amp; RAM</h2></div>
     <div class="card-body open">
       <div class="graph-wrap"><canvas id="remote-host-graph" class="graph small" role="img" aria-label="Remote host CPU and RAM usage over time"></canvas></div>
@@ -1861,6 +1869,9 @@ makeGraph('remote-power-graph', [
 makeGraph('remote-tok-graph', [
   {label: 'tok/s', color: cssVar('--green'), fill: true, fmt: v => v.toFixed(1) + ' tok/s'},
 ]);
+makeGraph('remote-prefill-graph', [
+  {label: 'prefill', color: cssVar('--orange'), fill: true, fmt: v => v.toFixed(0) + ' tok/s'},
+]);
 makeGraph('remote-host-graph', [
   {label: 'CPU', color: cssVar('--accent'), fill: true, fmt: v => v.toFixed(0) + ' %', yMax: 100},
   {label: 'RAM', color: cssVar('--purple'), fmt: v => v.toFixed(0) + ' %', yMax: 100},
@@ -1883,7 +1894,7 @@ function renderRemote(live, stats, hist) {
     cells.push({h: 'GPU', v: (hw.gpu_util ?? '-') + '%', s: (hw.gpu_temp ?? '-') + '°C · ' + (hw.gpu_power ?? '-') + 'W'});
     cells.push({h: 'VRAM', v: ((hw.gpu_mem_used/1048576).toFixed(0)) + ' GB', s: gpuMemTotal ? 'of ' + (gpuMemTotal/1048576).toFixed(0) + ' GB' : ''});
     cells.push({h: 'Host CPU', v: (hw.cpu ?? '-') + '%', s: 'RAM ' + (hw.ram_total ? (hw.ram_used/hw.ram_total*100).toFixed(0) : '-') + '%'});
-    cells.push({h: 'Speed', v: (hw.tok_s ?? '-') + ' tok/s', s: 'avg ' + (hw.tok_s_mean != null ? hw.tok_s_mean.toFixed(1) : '-')});
+    cells.push({h: 'Speed', v: (hw.tok_s ?? '-') + ' tok/s', s: 'prefill ' + (hw.prefill_tok_s_mean ? hw.prefill_tok_s_mean.toFixed(0) : '-') + ' · avg ' + (hw.tok_s_mean != null ? hw.tok_s_mean.toFixed(1) : '-')});
   }
   if (tot) cells.push({h: 'Requests', v: tot.requests ?? '-', s: (tot.output_tokens ?? 0).toLocaleString() + ' tok out'});
   if (liveS) cells.push({h: 'State', v: (liveS.state || 'idle'), s: liveS.queued ? liveS.queued + ' queued' : ''});
@@ -1917,6 +1928,7 @@ function renderRemote(live, stats, hist) {
   setGraphData('remote-vram-graph', [col('gpu_mem_used').map(p => [p[0], p[1] / 1048576])]);
   setGraphData('remote-power-graph', [col('gpu_power')]);
   setGraphData('remote-tok-graph', [col('tok_s')]);
+  setGraphData('remote-prefill-graph', [col('prefill_tok_s_mean')]);
   setGraphData('remote-host-graph', [col('cpu'), col('ram_pct')]);
   setGraphData('remote-req-graph', [col('req_delta'), col('disk_read')]);
 }
