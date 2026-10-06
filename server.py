@@ -241,10 +241,12 @@ _gpu_history_lock = threading.Lock()
 # /metrics endpoint over the LAN and persists the key series to
 # DATA_DIR/remote_metrics.sqlite3 with a default 7-day rolling retention:
 # rows older than the window are deleted on every write ("auto-refresh
-# overwrite"), so the DB stays a bounded few MB (7d @15s ≈ 40k rows).
+# overwrite"), so the DB stays bounded by retention (7d @1s ≈ 600k rows
+# worst case, a few tens of MB; queries downsample server-side).
 # SQLite ships with Python — no new dependencies.
 REMOTE_URL = os.getenv("AI_MONITOR_REMOTE_URL", "http://172.16.116.101:18080")
-REMOTE_INTERVAL = float(os.getenv("AI_MONITOR_REMOTE_INTERVAL", "15"))
+REMOTE_INTERVAL = float(os.getenv("AI_MONITOR_REMOTE_INTERVAL", "15"))  # probe interval while down
+REMOTE_ACTIVE_INTERVAL = float(os.getenv("AI_MONITOR_REMOTE_ACTIVE_INTERVAL", "1"))  # while up
 LT_RETENTION_S = int(os.getenv("AI_MONITOR_LT_RETENTION", "604800"))  # 7 days
 LT_DB_PATH = DATA_DIR / "remote_metrics.sqlite3"
 LT_MAX_POINTS = int(os.getenv("AI_MONITOR_LT_MAX_POINTS", "2000"))  # per-query cap
@@ -321,34 +323,37 @@ def lt_write(row: Dict[str, Any]):
 
 def lt_query(hours: float) -> List[Dict[str, Any]]:
     """Rows from the last `hours` hours, downsampled server-side to at
-    most LT_MAX_POINTS (max-pool by GPU/CPU load buckets, same idea as
-    History.sampled, so spikes survive downsampling)."""
+    most LT_MAX_POINTS. Downsampling happens in SQL: with 1s sampling a
+    7d window is ~600k rows, and pulling all of them into Python just to
+    throw most away would be wasteful. Time buckets keep the row with the
+    highest GPU+CPU load per bucket (max-pool), so spikes survive."""
     cutoff = time.time() - hours * 3600
+    cols = ",".join(_LT_COLS)
     try:
         with _lt_lock:
             conn = _lt_db()
+            n = conn.execute(
+                "SELECT COUNT(*) FROM remote_metrics WHERE ts >= ?", (cutoff,)).fetchone()[0]
+            if n <= LT_MAX_POINTS:
+                cur = conn.execute(
+                    "SELECT " + cols + " FROM remote_metrics WHERE ts >= ? ORDER BY ts ASC",
+                    (cutoff,))
+                rows = cur.fetchall()
+                return [dict(zip(_LT_COLS, r)) for r in rows]
+            span = max(time.time() - cutoff, 1.0)
+            bucket_s = span / LT_MAX_POINTS
             cur = conn.execute(
-                "SELECT " + ",".join(_LT_COLS) +
-                " FROM remote_metrics WHERE ts >= ? ORDER BY ts ASC", (cutoff,))
+                "SELECT " + cols + " FROM ("
+                "SELECT " + cols + ", ROW_NUMBER() OVER ("
+                "PARTITION BY CAST((ts - ?) / ? AS INTEGER) "
+                "ORDER BY (COALESCE(gpu_util,0) + COALESCE(cpu,0)) DESC, ts DESC) AS rn "
+                "FROM remote_metrics WHERE ts >= ?) WHERE rn = 1 ORDER BY ts ASC",
+                (cutoff, bucket_s, cutoff))
             rows = cur.fetchall()
     except Exception as e:
         logger.warning(f"remote metrics query failed: {e}")
         return []
-    if len(rows) <= LT_MAX_POINTS:
-        return [dict(zip(_LT_COLS, r)) for r in rows]
-    out = []
-    step = max(2, (len(rows) + LT_MAX_POINTS - 1) // LT_MAX_POINTS)
-    bucket: List[tuple] = []
-    for r in rows:
-        bucket.append(r)
-        if len(bucket) >= step:
-            idx = {c: i for i, c in enumerate(_LT_COLS)}
-            best = max(bucket, key=lambda r: (r[idx["gpu_util"]] or 0) + (r[idx["cpu"]] or 0))
-            out.append(dict(zip(_LT_COLS, best)))
-            bucket = []
-    if bucket:
-        out.append(dict(zip(_LT_COLS, bucket[-1])))
-    return out
+    return [dict(zip(_LT_COLS, r)) for r in rows]
 
 
 def lt_stats() -> Dict[str, Any]:
@@ -372,7 +377,8 @@ def lt_stats() -> Dict[str, Any]:
     return {"rows": row[0], "first_ts": row[1], "last_ts": row[2],
             "size_bytes": size, "retention_s": LT_RETENTION_S,
             "last_event": ({"ts": last_ev[0], "event": last_ev[1]} if last_ev else None),
-            "interval_s": REMOTE_INTERVAL, "url": REMOTE_URL, **scraper}
+            "interval_s": REMOTE_ACTIVE_INTERVAL, "down_interval_s": REMOTE_INTERVAL,
+            "url": REMOTE_URL, **scraper}
 
 
 def _remote_delta(cur: Optional[float], prev: Optional[float]) -> Optional[float]:
@@ -450,10 +456,14 @@ def _remote_scrape_loop():
     """Poll the remote strata /metrics and persist each sample. The last
     successful payload is also kept in memory for the live card.
 
-    The AI server is NOT always on — being unreachable is the normal
-    state, not an error. So: transitions are recorded as up/down events
-    (drawn as gap markers in the UI), and while down we back off to one
-    probe per minute instead of hammering a closed port every 15s."""
+    Two cadences, because the AI server is NOT always on and requests can
+    be very short:
+    - while reachable: sample every REMOTE_ACTIVE_INTERVAL (1s default)
+      so requests that finish in a few seconds are still captured;
+    - while unreachable (powered off — the normal state, not an error):
+      probe every REMOTE_INTERVAL (15s default) instead of hammering a
+      closed port every second.
+    Transitions are recorded as up/down events (drawn as gap markers)."""
     global _remote_prev
     if not REMOTE_URL:
         return
@@ -461,7 +471,7 @@ def _remote_scrape_loop():
     ever_recorded = False  # the first success records an "up" too, so the
     # availability bar always has a starting state even if no transition
     # happens to occur within the selected window.
-    while not _shutdown.wait(60.0 if down_since else REMOTE_INTERVAL):
+    while not _shutdown.wait(REMOTE_INTERVAL if down_since is not None else REMOTE_ACTIVE_INTERVAL):
         try:
             req = urllib.request.Request(REMOTE_URL.rstrip("/") + "/metrics",
                                         headers={"Accept-Encoding": "gzip"})

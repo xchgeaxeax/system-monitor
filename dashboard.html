@@ -1238,17 +1238,24 @@ async function fetchData() {
     }
   }
   if (tab === 'remote') {
-    // Long-term store: the scraper writes every 15s server-side, so the
-    // tab only needs a slow refresh (10s) instead of the 1.5s poll.
+    // Server samples every 1s while the AI server is up, so the live
+    // cards poll fast (2s); the long-term history only changes the chart,
+    // so it stays on a slow 10s poll.
     const now = Date.now();
-    if (!state._remoteLast || now - state._remoteLast >= 10000) {
+    const wantHist = !state._remoteLast || now - state._remoteLast >= 10000;
+    const hrs = $('remote-range').value || '24';
+    if (wantHist) {
       state._remoteLast = now;
-      const hrs = $('remote-range').value || '24';
       Promise.all([
         api('/api/remote').catch(() => ({ok: false, data: null})),
         api('/api/remote/stats').catch(() => null),
         api('/api/remote/history?hours=' + hrs).catch(() => ({rows: [], events: []})),
       ]).then(([live, stats, hist]) => renderRemote(live, stats, hist || {rows: [], events: []}));
+    } else {
+      Promise.all([
+        api('/api/remote').catch(() => ({ok: false, data: null})),
+        api('/api/remote/stats').catch(() => null),
+      ]).then(([live, stats]) => renderRemote(live, stats, state._remoteHist || {rows: [], events: []}));
     }
   }
   if (tab === 'settings') { fetchMe(); fetchKeys(); }
@@ -1882,6 +1889,7 @@ makeGraph('remote-req-graph', [
 ]);
 
 function renderRemote(live, stats, hist) {
+  if (hist && hist.rows) state._remoteHist = hist;  // reused by the fast live-only poll
   const statsEl = $('remote-stats');
   const note = $('remote-note');
   const rows = (hist && hist.rows) || [];
@@ -1913,7 +1921,7 @@ function renderRemote(live, stats, hist) {
       ? Math.round((Date.now()/1000 - stats.last_event.ts) / 60) : null;
     const status = live.ok
       ? 'Scraping ' + stats.url + ' every ' + stats.interval_s + 's'
-      : 'AI server offline (probing every 60s)' + (offMin != null && offMin > 1 ? ' · down ' + fmtDur(offMin*60) : '');
+      : 'AI server offline (probing every ' + (stats.down_interval_s || 15) + 's)' + (offMin != null && offMin > 1 ? ' · down ' + fmtDur(offMin*60) : '');
     note.innerHTML = esc(status) +
       (stats.rows ? ' · stored rows: ' + stats.rows.toLocaleString() +
         ' · DB: ' + (stats.size_bytes/1048576).toFixed(1) + ' MB' +
