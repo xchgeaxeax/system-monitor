@@ -46,7 +46,7 @@ A lightweight performance monitor for AI / home servers. Key design:
 - 📱 **PWA** — 可"添加到主屏幕"当 App 用，离线可打开面板（Service Worker 缓存）
 - ♿ **可访问性** — 标签页支持键盘导航（方向键/Home/End）与 ARIA 标注
 - 🪶 **自我监控** — 概览页显示本工具自身 CPU / 内存 / 线程数（实测空闲约 1% CPU、~66 MB 内存）；无对应 GPU 时自动跳过厂商工具
-- 🌐 **远程监控（strata）** — 抓取局域网推理服务器（llama.cpp strata `/metrics`）的 GPU/温度/功耗/tok/s/请求数等指标，写入 SQLite 长期数据库（默认保留 7 天，旧数据自动删除覆盖）；Remote Monitor 标签页提供 1h/6h/24h/3d/7d 长期曲线。AI 服务不常开也被当作正常状态处理：关机期间自动降为每 60s 探测一次，开/关机切换记录为可用性事件，图表以断线 + 绿/红可用性时间条呈现，明确标注"离线多久"
+- 🌐 **远程监控（strata）** — 抓取局域网推理服务器（llama.cpp strata `/metrics`）的 GPU/温度/功耗/生成与预填充速度/请求数等指标，写入 SQLite 长期数据库（默认保留 7 天，旧数据自动删除覆盖）；Remote Monitor 标签页提供 1h/6h/24h/3d/7d 长期曲线。AI 服务不常开也被当作正常状态处理：关机期间自动降为每 60s 探测一次，开/关机切换记录为可用性事件，图表以断线 + 绿/红可用性时间条呈现，明确标注"离线多久"
 - 🔧 **命令行管理** — `monitor-cli.py`：用户、密码、API Key、告警
 
 - 🔐 **Multi-user auth** — first-run admin setup; admins create/delete/reset/demote regular users; each user manages their own API keys
@@ -61,7 +61,7 @@ A lightweight performance monitor for AI / home servers. Key design:
 - 📱 **PWA** — "Add to Home Screen" as an app; opens offline (Service Worker cache)
 - ♿ **Accessible** — keyboard-navigable tabs (arrows/Home/End) + ARIA labels
 - 🪶 **Self-monitoring** — the overview shows the tool's own CPU / RSS / threads (measured ~1% CPU, ~66 MB RSS idle); GPU sampler skips vendor tools when no such GPU is present
-- 🌐 **Remote monitor (strata)** — scrapes a LAN inference server's (llama.cpp strata `/metrics`) GPU/temp/power/tok-s/request metrics into a SQLite long-term store (7-day rolling retention, old rows auto-deleted); the Remote Monitor tab charts 1h/6h/24h/3d/7d windows. A powered-off AI server is treated as a normal state: probing backs off to once a minute while down, up/down transitions are recorded as availability events, and charts show honest gaps plus a green/red availability strip with "offline for X"
+- 🌐 **Remote monitor (strata)** — scrapes a LAN inference server's (llama.cpp strata `/metrics`) GPU/temp/power/generation & prefill speed/request metrics into a SQLite long-term store (7-day rolling retention, old rows auto-deleted); the Remote Monitor tab charts 1h/6h/24h/3d/7d windows. A powered-off AI server is treated as a normal state: probing backs off to once a minute while down, up/down transitions are recorded as availability events, and charts show honest gaps plus a green/red availability strip with "offline for X"
 - 🔧 **CLI management** — `monitor-cli.py`: users, passwords, API keys, alerts
 
 ## 界面预览 / Screenshots
