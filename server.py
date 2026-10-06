@@ -266,6 +266,10 @@ CREATE TABLE IF NOT EXISTS remote_metrics (
   req_delta REAL, tok_out_delta REAL,
   requests REAL, prompt_tokens REAL, output_tokens REAL
 );
+CREATE TABLE IF NOT EXISTS remote_events (
+  ts REAL PRIMARY KEY,
+  event TEXT
+);
 """
 
 
@@ -348,10 +352,18 @@ def lt_stats() -> Dict[str, Any]:
             size = LT_DB_PATH.stat().st_size if LT_DB_PATH.exists() else 0
     except Exception:
         row, size = (0, None, None), 0
+    try:
+        with _lt_lock:
+            conn = _lt_db()
+            last_ev = conn.execute(
+                "SELECT ts, event FROM remote_events ORDER BY ts DESC LIMIT 1").fetchone()
+    except Exception:
+        last_ev = None
     with _remote_lock:
         scraper = {"ok": _remote_live["ok"], "last_scrape": _remote_live["time"]}
     return {"rows": row[0], "first_ts": row[1], "last_ts": row[2],
             "size_bytes": size, "retention_s": LT_RETENTION_S,
+            "last_event": ({"ts": last_ev[0], "event": last_ev[1]} if last_ev else None),
             "interval_s": REMOTE_INTERVAL, "url": REMOTE_URL, **scraper}
 
 
@@ -395,13 +407,49 @@ def _remote_parse(data: Dict[str, Any], prev: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def lt_event(event: str):
+    """Record an availability transition ('up'/'down'). Tiny table, same
+    retention as the metrics. Lets the UI explain gaps in the charts:
+    the AI server being powered off is normal, not missing data."""
+    try:
+        with _lt_lock:
+            conn = _lt_db()
+            conn.execute("INSERT OR REPLACE INTO remote_events VALUES (?,?)",
+                         (time.time(), event[:32]))
+            conn.execute("DELETE FROM remote_events WHERE ts < ?", (time.time() - LT_RETENTION_S,))
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"remote event write failed: {e}")
+
+
+def lt_events(hours: float) -> List[Dict[str, Any]]:
+    cutoff = time.time() - hours * 3600
+    try:
+        with _lt_lock:
+            conn = _lt_db()
+            cur = conn.execute(
+                "SELECT ts, event FROM remote_events WHERE ts >= ? ORDER BY ts ASC", (cutoff,))
+            return [{"ts": r[0], "event": r[1]} for r in cur.fetchall()]
+    except Exception:
+        return []
+
+
 def _remote_scrape_loop():
     """Poll the remote strata /metrics and persist each sample. The last
-    successful payload is also kept in memory for the live card."""
+    successful payload is also kept in memory for the live card.
+
+    The AI server is NOT always on — being unreachable is the normal
+    state, not an error. So: transitions are recorded as up/down events
+    (drawn as gap markers in the UI), and while down we back off to one
+    probe per minute instead of hammering a closed port every 15s."""
     global _remote_prev
     if not REMOTE_URL:
         return
-    while not _shutdown.wait(REMOTE_INTERVAL):
+    down_since: Optional[float] = None  # set while unreachable
+    ever_recorded = False  # the first success records an "up" too, so the
+    # availability bar always has a starting state even if no transition
+    # happens to occur within the selected window.
+    while not _shutdown.wait(60.0 if down_since else REMOTE_INTERVAL):
         try:
             req = urllib.request.Request(REMOTE_URL.rstrip("/") + "/metrics",
                                         headers={"Accept-Encoding": "gzip"})
@@ -422,10 +470,21 @@ def _remote_scrape_loop():
                 }
                 _remote_live["time"] = time.time()
                 _remote_live["ok"] = True
+                was_down = down_since is not None
+                down_since = None
             lt_write(row)
+            if was_down or not ever_recorded:
+                lt_event("up")  # AI server came back (or first time seen)
+            ever_recorded = True
         except Exception as e:
+            first_down = False
             with _remote_lock:
                 _remote_live["ok"] = False
+                if down_since is None:
+                    first_down = True
+                down_since = down_since or time.time()
+            if first_down:
+                lt_event("down")  # AI server went away (powered off / restarting)
             logger.debug(f"remote scrape failed: {e}")
 
 # ── GPU topology cache ──────────────────────────────────────────────────
@@ -2895,9 +2954,11 @@ def api_remote_live():
 
 @app.get("/api/remote/history", dependencies=[Depends(require_auth)])
 def api_remote_history(hours: float = Query(default=1.0, gt=0, le=168)):
-    """Persisted long-term series for the last `hours` (max 168 = 7d),
-    downsampled server-side. Reads are cheap: one indexed range scan."""
-    return lt_query(hours)
+    """Rows from the last `hours` (max 168 = 7d), downsampled server-side,
+    plus up/down availability events in the same window. The AI server is
+    not always on: gaps between rows are expected and the events explain
+    them. Shape: {"rows": [...], "events": [...]}."""
+    return {"rows": lt_query(hours), "events": lt_events(hours)}
 
 
 @app.get("/api/remote/stats", dependencies=[Depends(require_auth)])

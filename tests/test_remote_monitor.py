@@ -83,6 +83,18 @@ def test_lt_query_downsamples_keeping_spikes(server_mod):
         pass
 
 
+def test_remote_events_roundtrip(server_mod):
+    server_mod.lt_event("down")
+    server_mod.lt_event("up")
+    events = server_mod.lt_events(1)
+    assert len(events) >= 2
+    assert events[-2]["event"] == "down" and events[-1]["event"] == "up"
+    # stats must expose the last event so the UI can show "offline since"
+    stats = server_mod.lt_stats()
+    assert stats["last_event"] is not None
+    assert stats["last_event"]["event"] == "up"
+
+
 def test_remote_endpoints_shape(client, admin, server_mod):
     r = client.get("/api/remote", headers=admin)
     assert r.status_code == 200
@@ -97,7 +109,8 @@ def test_remote_endpoints_shape(client, admin, server_mod):
 
     r = client.get("/api/remote/history?hours=24", headers=admin)
     assert r.status_code == 200
-    assert isinstance(r.json(), list)
+    d = r.json()
+    assert isinstance(d["rows"], list) and isinstance(d["events"], list)
 
     # parameter validation
     assert client.get("/api/remote/history?hours=0", headers=admin).status_code == 422

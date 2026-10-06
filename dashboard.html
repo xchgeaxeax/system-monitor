@@ -1231,8 +1231,8 @@ async function fetchData() {
       Promise.all([
         api('/api/remote').catch(() => ({ok: false, data: null})),
         api('/api/remote/stats').catch(() => null),
-        api('/api/remote/history?hours=' + hrs).catch(() => []),
-      ]).then(([live, stats, hist]) => renderRemote(live, stats, hist));
+        api('/api/remote/history?hours=' + hrs).catch(() => ({rows: [], events: []})),
+      ]).then(([live, stats, hist]) => renderRemote(live, stats, hist || {rows: [], events: []}));
     }
   }
   if (tab === 'settings') { fetchMe(); fetchKeys(); }
@@ -1863,6 +1863,8 @@ makeGraph('remote-req-graph', [
 function renderRemote(live, stats, hist) {
   const statsEl = $('remote-stats');
   const note = $('remote-note');
+  const rows = (hist && hist.rows) || [];
+  const events = (hist && hist.events) || [];
   const d = live && live.data;
   const hw = d && d.hardware, tot = d && d.totals, liveS = d && d.live;
   const gpuMemTotal = (hw && hw.gpu_mem_total) || 0;
@@ -1875,26 +1877,64 @@ function renderRemote(live, stats, hist) {
   }
   if (tot) cells.push({h: 'Requests', v: tot.requests ?? '-', s: (tot.output_tokens ?? 0).toLocaleString() + ' tok out'});
   if (liveS) cells.push({h: 'State', v: (liveS.state || 'idle'), s: liveS.queued ? liveS.queued + ' queued' : ''});
-  statsEl.innerHTML = cells.map(c =>
-    `<div class="stat"><h3>${esc(c.h)}</h3><div class="value">${esc(String(c.v))}</div><div class="sub">${esc(c.s || '')}</div></div>`).join('');
+  // The AI server being powered off is a normal state: say so plainly
+  // instead of showing stale numbers as if they were live.
+  if (!live.ok) {
+    cells.unshift({h: 'AI Server', v: '离线 Offline', s: stats && stats.last_event && stats.last_event.event === 'down'
+      ? 'since ' + new Date(stats.last_event.ts*1000).toLocaleString() : 'unreachable'});
+  }
+  statsEl.innerHTML = cells.length ? cells.map(c =>
+    `<div class="stat"><h3>${esc(c.h)}</h3><div class="value">${esc(String(c.v))}</div><div class="sub">${esc(c.s || '')}</div></div>`).join('')
+    : '<p class="muted" style="font-size:13px">No data yet — the AI server has never been reachable, or it is powered off. Charts will fill in while it is up.</p>';
   if (stats) {
     const age = stats.last_ts ? Math.round(Date.now()/1000 - stats.last_ts) : null;
-    note.textContent = (live.ok ? 'Scraping ' + stats.url + ' every ' + stats.interval_s + 's' :
-      'Cannot reach ' + stats.url + ' — showing last stored data') +
-      ' · stored rows: ' + stats.rows.toLocaleString() +
-      ' · DB: ' + (stats.size_bytes/1048576).toFixed(1) + ' MB' +
-      ' · retention: ' + Math.round(stats.retention_s/86400) + 'd (old data auto-deleted)' +
-      (age != null && age < 3600 ? ' · last sample ' + age + 's ago' : '');
+    const offMin = stats.last_event && stats.last_event.event === 'down'
+      ? Math.round((Date.now()/1000 - stats.last_event.ts) / 60) : null;
+    const status = live.ok
+      ? 'Scraping ' + stats.url + ' every ' + stats.interval_s + 's'
+      : 'AI server offline (probing every 60s)' + (offMin != null && offMin > 1 ? ' · down ' + fmtDur(offMin*60) : '');
+    note.innerHTML = esc(status) +
+      (stats.rows ? ' · stored rows: ' + stats.rows.toLocaleString() +
+        ' · DB: ' + (stats.size_bytes/1048576).toFixed(1) + ' MB' +
+        ' · retention: ' + Math.round(stats.retention_s/86400) + 'd (old data auto-deleted)' : '') +
+      (age != null && age < 3600 && live.ok ? ' · last sample ' + age + 's ago' : '') +
+      (events.length ? renderAvailBar(events, stats) : '');
   }
-  // Series from history rows (skip nulls per-series).
-  const col = (k) => hist.filter(r => r[k] != null).map(r => [r.ts, r[k]]);
+  // Series from history rows (skip nulls per-series). Gaps = AI server
+  // was off; the adaptive gap-break in drawGraph leaves a visible break.
+  const col = (k) => rows.filter(r => r[k] != null).map(r => [r.ts, r[k]]);
   setGraphData('remote-gpu-graph', [col('gpu_util'), col('gpu_temp')]);
   setGraphData('remote-vram-graph', [
-    hist.filter(r => r.gpu_mem_used != null).map(r => [r.ts, r.gpu_mem_used/1048576]),
+    rows.filter(r => r.gpu_mem_used != null).map(r => [r.ts, r.gpu_mem_used/1048576]),
     col('gpu_power')]);
   setGraphData('remote-tok-graph', [col('tok_s')]);
   setGraphData('remote-host-graph', [col('cpu'), col('ram_pct')]);
   setGraphData('remote-req-graph', [col('req_delta'), col('disk_read')]);
+}
+
+const fmtDur = s => { const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
+  return (d?d+'d ':'')+(h||d?h+'h ':'')+m+'m'; };
+
+// Availability strip: green = AI server up, red = down, gray = unknown
+// (before the first recorded event). Built from the up/down transition
+// events over the selected window, so chart gaps are self-explanatory.
+function renderAvailBar(events, stats) {
+  const rangeS = (parseFloat($('remote-range').value) || 24) * 3600;
+  const t1 = Date.now() / 1000, t0 = t1 - rangeS;
+  const W = 200, segs = [];
+  let cursor = t0, state = null;  // null = unknown before first event
+  for (const ev of events) {
+    if (ev.ts <= t0) { state = ev.event; continue; }
+    const x0 = (cursor - t0) / rangeS * W, x1 = (Math.min(ev.ts, t1) - t0) / rangeS * W;
+    if (state) segs.push({x0, w: x1 - x0, up: state === 'up'});
+    cursor = ev.ts; state = ev.event;
+  }
+  if (state) segs.push({x0: (cursor - t0) / rangeS * W, w: W - (cursor - t0) / rangeS * W, up: state === 'up'});
+  const rects = segs.map(s =>
+    `<rect x="${s.x0.toFixed(1)}" y="0" width="${Math.max(s.w, .5).toFixed(1)}" height="10" fill="var(--${s.up ? 'green' : 'red'})" opacity=".8"/>`).join('');
+  return `<br><span style="font-size:11px;color:var(--muted)">服务器可用性（绿=开机 / 红=关机）server availability:</span>` +
+    `<svg viewBox="0 0 ${W} 10" preserveAspectRatio="none" style="width:100%;max-width:420px;height:10px;display:inline-block;vertical-align:middle;background:var(--card2);border-radius:3px" role="img" aria-label="AI server availability timeline">` +
+    `<rect width="${W}" height="10" fill="var(--border)" opacity=".35"/>${rects}</svg>`;
 }
 // time label ids for graphs
 ['net-graph', 'net-graph-2', 'cpu-freq-graph', 'disk-graph'].forEach(id => {
