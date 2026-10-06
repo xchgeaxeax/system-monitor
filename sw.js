@@ -7,8 +7,8 @@
  *   on the next load, not hidden behind a stale cache until the cache
  *   name changes. The cache is the offline fallback only.
  */
-const CACHE = 'sysmon-v2';
-const SHELL = ['/', '/sw.js'];
+const CACHE = 'sysmon-v3';
+const SHELL = ['/', '/sw.js', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).catch(() => {}));

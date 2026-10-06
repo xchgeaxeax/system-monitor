@@ -87,7 +87,7 @@ def test_logs_shape_and_filters(client, admin):
     assert "logs" in d and "units" in d
     assert isinstance(d["logs"], list)
     # journalctl may be unavailable in this environment; shape must hold anyway
-    assert all(isinstance(l, str) for l in d["logs"])
+    assert all(isinstance(line, str) for line in d["logs"])
     # level/search/unit filters must not 500 regardless of availability
     for q in ("level=error", "unit=systemd-journald", "search=loop"):
         r = client.get(f"/api/logs?{q}", headers=admin)

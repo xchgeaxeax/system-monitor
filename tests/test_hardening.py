@@ -59,7 +59,7 @@ def test_memory_proc_list_is_cached(server_mod):
     # Totals must stay live even when the list is cached: expiring the cache
     # must trigger a rescan (fresh timestamp), not an error.
     server_mod._proc_mem_cache["time"] = 0.0
-    s3 = server_mod._get_memory_snapshot(proc_list=True)
+    server_mod._get_memory_snapshot(proc_list=True)
     assert server_mod._proc_mem_cache["time"] >= t_before
 
 

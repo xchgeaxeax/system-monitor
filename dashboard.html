@@ -4,8 +4,9 @@
 <meta charset="utf-8">
 <title>System Monitor</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E">
-<link rel="manifest" href='data:application/manifest+json,{"name":"System Monitor","short_name":"SysMon","start_url":".","display":"standalone","background_color":"%230a0e14","theme_color":"%230a0e14","icons":[{"src":"data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 100 100%27%3E%3Ctext y=%27.9em%27 font-size=%2790%27%3E%F0%9F%93%88%3C/text%3E%3C/svg%3E","sizes":"any","type":"image/svg+xml"}]}'>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.svg">
 <meta name="theme-color" content="#0a0e14">
 <meta name="mobile-web-app-capable" content="yes">
 <style>
@@ -56,6 +57,7 @@ input:focus,select:focus{border-color:var(--accent)}
 .logo{font-size:17px;font-weight:700;white-space:nowrap}
 .version{font-size:11px;color:var(--muted);background:var(--card2);padding:2px 7px;border-radius:4px}
 .topbar .right{display:flex;align-items:center;gap:14px;font-size:13px;color:var(--muted);flex-shrink:0}
+.topbar-select{padding:3px 6px;font-size:12px;border-radius:5px;cursor:pointer}
 .topbar .right b{color:var(--dim);font-weight:600;font-variant-numeric:tabular-nums}
 .icon-btn{background:transparent;border:1px solid var(--border);border-radius:7px;color:var(--dim);padding:5px 9px;font-size:13px;white-space:nowrap}
 .icon-btn:hover{border-color:var(--accent);color:var(--text)}
@@ -277,6 +279,8 @@ td.num,th.num{text-align:right}
       <button class="icon-btn" id="alert-bell">🔔</button>
       <span class="count" id="alert-count" style="display:none">0</span>
     </span>
+    <select class="topbar-select hide-m" id="hist-select" title="Chart history window" aria-label="Chart history window"></select>
+    <select class="topbar-select hide-m" id="refresh-select" title="Data refresh interval" aria-label="Data refresh interval"></select>
     <button class="icon-btn" id="theme-btn" title="Toggle theme (auto → dark → light)">🌗</button>
     <button class="icon-btn" id="settings-btn" title="Settings">⚙️</button>
     <span class="refresh-status" id="refresh-status"><span class="dot"></span><span id="refresh-text">Live</span></span>
@@ -581,12 +585,19 @@ td.num,th.num{text-align:right}
 // ══════════════════════════════════════════════════════════════════════
 // State
 // ══════════════════════════════════════════════════════════════════════
-const REFRESH_MS = 1500;
+const REFRESH_OPTIONS = [
+  {v: 5000, label: '5s'}, {v: 3000, label: '3s'}, {v: 1500, label: '1.5s'},
+];
+const HIST_OPTIONS = [
+  {v: 5, label: '5m'}, {v: 15, label: '15m'}, {v: 60, label: '1h'},
+];
 const state = {
   token: localStorage.getItem('am_token') || '',
   username: '',
   role: 'user',
   theme: localStorage.getItem('am_theme') || 'auto',
+  refreshMs: parseInt(localStorage.getItem('am_refresh_ms') || '1500', 10),
+  histMin: parseInt(localStorage.getItem('am_hist_min') || '15', 10),
   visible: true,
   tab: 'overview',
   procSort: 'cpu',
@@ -598,6 +609,9 @@ const state = {
   serverDown: false,
 };
 let refreshTimer = null;
+// Guard against tampered/corrupt localStorage values.
+if (!REFRESH_OPTIONS.some(o => o.v === state.refreshMs)) state.refreshMs = 1500;
+if (!HIST_OPTIONS.some(o => o.v === state.histMin)) state.histMin = 15;
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtBytes = mb => mb >= 1024 ? (mb/1024).toFixed(1)+' GB' : mb.toFixed(0)+' MB';
@@ -823,6 +837,26 @@ document.querySelectorAll('.tab').forEach(t => {
 document.querySelectorAll('.stat.click').forEach(s => s.addEventListener('click', () => switchTab(s.dataset.goto)));
 $('alert-bell').addEventListener('click', () => switchTab('alerts'));
 $('settings-btn').addEventListener('click', () => switchTab('settings'));
+
+// Topbar refresh-interval + chart-window selectors (persisted).
+function fillSelect(el, options, current, onChange) {
+  el.innerHTML = options.map(o =>
+    `<option value="${o.v}"${o.v === current ? ' selected' : ''}>${o.label}</option>`).join('');
+  el.addEventListener('change', () => { onChange(parseInt(el.value, 10)); });
+}
+fillSelect($('refresh-select'), REFRESH_OPTIONS, state.refreshMs, v => {
+  state.refreshMs = v;
+  localStorage.setItem('am_refresh_ms', String(v));
+  startRefresh();
+});
+fillSelect($('hist-select'), HIST_OPTIONS, state.histMin, v => {
+  state.histMin = v;
+  localStorage.setItem('am_hist_min', String(v));
+  fetchData();  // re-fetch charts immediately with the new window
+});
+// Server retains 1h; clamp the requested window so the option list and the
+// server's retention can never disagree visually.
+const histQ = () => `?minute=${state.histMin}`;
 $('theme-btn').addEventListener('click', cycleTheme);
 document.querySelectorAll('[data-theme-set]').forEach(b => b.addEventListener('click', () => {
   state.theme = b.dataset.themeSet;
@@ -833,7 +867,7 @@ document.querySelectorAll('[data-theme-set]').forEach(b => b.addEventListener('c
 // ══════════════════════════════════════════════════════════════════════
 // Canvas graphs (gap-aware, hover tooltip)
 // ══════════════════════════════════════════════════════════════════════
-const GAP_MS = 8000; // break line if points are farther apart than this
+const GAP_BREAK_FACTOR = 6; // break the line when a gap exceeds 6x the typical spacing
 const graphs = {}; // id -> {canvas, series, hover}
 
 function cssVar(name) {
@@ -934,6 +968,10 @@ function drawGraph(id) {
   for (const s of g.series) {
     const pts = s.points;
     if (pts.length < 2) continue;
+    // Gap threshold adapts to the data density: downsampled history has
+    // wider spacing, and a fixed threshold would break valid lines apart.
+    const typical = pts.length > 1 ? (pts[pts.length-1][0] - pts[0][0]) / (pts.length - 1) : 0;
+    const gapBreak = Math.max(typical * GAP_BREAK_FACTOR, 10);
     ctx.strokeStyle = s.color;
     ctx.lineWidth = 1.6;
     ctx.lineJoin = 'round';
@@ -944,7 +982,7 @@ function drawGraph(id) {
       if (!started) { ctx.moveTo(px, py); started = true; }
       else {
         const gap = pts[i][0] - pts[i-1][0];
-        if (gap > GAP_MS / 1000) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        if (gap > gapBreak) ctx.moveTo(px, py); else ctx.lineTo(px, py);
       }
     }
     ctx.stroke();
@@ -1061,17 +1099,17 @@ async function fetchData() {
     api('/api/monitor').then(renderMonitor).catch(e => {}),
   ];
   if (tab === 'overview') jobs.push(
-    api('/api/net-history').then(d => {
+    api('/api/net-history' + histQ()).then(d => {
       setGraphData('net-graph', [d.map(p => [p[0], p[1]]), d.map(p => [p[0], p[2]])]);
     }).catch(e => {})
   );
   if (tab === 'cpu') jobs.push(
     api('/api/cpu').then(renderCpu).catch(showError),
-    api('/api/cpu-freq-history').then(d => setGraphData('cpu-freq-graph', [d.map(p => [p[0], p[1]])])).catch(e => {})
+    api('/api/cpu-freq-history' + histQ()).then(d => setGraphData('cpu-freq-graph', [d.map(p => [p[0], p[1]])])).catch(e => {})
   );
   if (tab === 'gpu') jobs.push(
     api('/api/gpu').then(renderGpu).catch(showError),
-    api('/api/gpu-history').then(d => {
+    api('/api/gpu-history' + histQ()).then(d => {
       const ids = Object.keys(d);
       for (const id of ids) {
         setGraphData('gpu-graph-' + id, [
@@ -1084,7 +1122,7 @@ async function fetchData() {
   if (tab === 'memory') jobs.push(api('/api/memory').then(renderMemory).catch(showError));
   if (tab === 'storage') jobs.push(
     api('/api/storage').then(renderStorage).catch(showError),
-    api('/api/disk-io-history').then(d => {
+    api('/api/disk-io-history' + histQ()).then(d => {
       // d: [ts, {disk: [read_mbps, write_mbps]}]
       const disks = new Set();
       d.forEach(p => Object.keys(p[1]).forEach(k => disks.add(k)));
@@ -1098,7 +1136,7 @@ async function fetchData() {
   );
   if (tab === 'network') jobs.push(
     api('/api/network').then(renderNetwork).catch(showError),
-    api('/api/net-history').then(d => setGraphData('net-graph-2', [d.map(p => [p[0], p[1]]), d.map(p => [p[0], p[2]])])).catch(e => {})
+    api('/api/net-history' + histQ()).then(d => setGraphData('net-graph-2', [d.map(p => [p[0], p[1]]), d.map(p => [p[0], p[2]])])).catch(e => {})
   );
   if (tab === 'temps') jobs.push(api('/api/temps').then(renderTemps).catch(showError));
   if (tab === 'processes') jobs.push(
@@ -1685,7 +1723,7 @@ $('pw-change-btn').addEventListener('click', async () => {
 // ══════════════════════════════════════════════════════════════════════
 function startRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
-  refreshTimer = setInterval(() => { if (state.visible) fetchData(); }, REFRESH_MS);
+  refreshTimer = setInterval(() => { if (state.visible) fetchData(); }, state.refreshMs);
   fetchData();
 }
 function stopRefresh() {

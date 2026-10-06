@@ -1,0 +1,7 @@
+# Minimal, high-signal lint: real errors (F) + common mistakes (E4/E7/E9).
+# Deliberately NOT style-only rules (E501 line length, formatting) — this
+# project values low-dependency simplicity over formatter churn.
+line-length = 120
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

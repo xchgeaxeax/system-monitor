@@ -11,7 +11,6 @@ pytest-asyncio dependency.
 import asyncio
 import gzip
 
-import pytest
 
 
 async def _call_app(app, path="/", accept_encoding=""):

@@ -1,7 +1,6 @@
 """Auth flow, RBAC, API keys, and login security (rate limit, session cap)."""
 import time
 
-import pytest
 
 from conftest import do_login
 

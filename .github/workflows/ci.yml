@@ -33,6 +33,10 @@ jobs:
         run: |
           python -m py_compile server.py monitor-cli.py
 
+      - name: Lint (ruff)
+        run: |
+          python -m ruff check server.py monitor-cli.py tests/
+
       - name: Shell syntax check
         run: bash -n deploy.sh
 

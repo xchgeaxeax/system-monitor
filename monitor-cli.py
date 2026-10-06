@@ -33,6 +33,12 @@ from pathlib import Path
 DATA_DIR = Path(os.getenv("AI_MONITOR_DATA_DIR", str(Path(__file__).resolve().parent / "data")))
 AUTH_FILE = DATA_DIR / "auth.json"
 ALERT_FILE = DATA_DIR / "alerts.json"
+# IMPORTANT: the auth file format and hashing below mirror server.py
+# ("# ── Auth" section: PBKDF2_ITER, sha256, hex(salt) + ":" + hex(hash)).
+# This CLI deliberately does NOT import server.py (that would pull in
+# fastapi/psutil just to manage users). If you change the format here,
+# change it there too — the server picks up external edits via its auth
+# file mtime cache, so edits made here take effect immediately.
 PBKDF2_ITER = 390000
 ROLES = ("admin", "user")
 

@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import gzip as _gzip
-import zlib as _zlib
 
 import psutil
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -55,7 +54,7 @@ logging.basicConfig(
 logger = logging.getLogger("ai-monitor")
 
 # ── Config (env overrides) ──────────────────────────────────────────────
-VERSION = "4.3"
+VERSION = "4.4"
 PORT = int(os.getenv("AI_MONITOR_PORT", "9527"))
 HOST = os.getenv("AI_MONITOR_HOST", "0.0.0.0")
 DEBUG = os.getenv("AI_MONITOR_DEBUG", "").lower() in ("1", "true")
@@ -73,8 +72,8 @@ AUTH_FILE = DATA_DIR / "auth.json"
 ALERT_FILE = DATA_DIR / "alerts.json"
 
 SAMPLE_INTERVAL = float(os.getenv("AI_MONITOR_SAMPLE_INTERVAL", "1.5"))
-HISTORY_WINDOW_S = int(os.getenv("AI_MONITOR_HISTORY_WINDOW", "300"))  # 5 min
-HISTORY_MAX_POINTS = int(os.getenv("AI_MONITOR_HISTORY_POINTS", "240"))
+HISTORY_WINDOW_S = int(os.getenv("AI_MONITOR_HISTORY_WINDOW", "3600"))  # 1 h retention
+HISTORY_MAX_POINTS = int(os.getenv("AI_MONITOR_HISTORY_POINTS", "2400"))  # 3600s / 1.5s
 SMART_TTL = int(os.getenv("AI_MONITOR_SMART_TTL", "60"))
 TOOL_CHECK_TTL = 300
 SESSION_TTL_S = int(os.getenv("AI_MONITOR_SESSION_TTL", str(12 * 3600)))
@@ -191,6 +190,42 @@ class History:
     def last(self, n: int = 0) -> List[tuple]:
         with self.lock:
             return self.points[-n:] if n else list(self.points)
+
+    def sampled(self, points: int = 400, window_s: float = 0) -> List[tuple]:
+        """Return at most `points` points covering the last `window_s` seconds
+        (0 = everything retained). When there are more raw points than
+        `points`, max-pool into buckets: the point with the largest magnitude
+        per bucket wins, so traffic spikes stay visible after downsampling."""
+        with self.lock:
+            pts = self.points
+            if window_s and window_s > 0:
+                cutoff = time.time() - window_s
+                pts = [p for p in pts if p[0] >= cutoff]
+            if points <= 0 or len(pts) <= points:
+                return list(pts)
+            out = []
+            n_raw = len(pts)
+            for b in range(points):
+                lo = b * n_raw // points
+                hi = max(lo + 1, (b + 1) * n_raw // points)
+                best = max(pts[lo:hi], key=_point_magnitude)
+                out.append(best)
+            return out
+
+
+def _point_magnitude(item: tuple) -> float:
+    """Sum of all numeric values in a history point (for max-pool picks)."""
+    total = 0.0
+    for v in item[1:]:
+        if isinstance(v, (int, float)):
+            total += v
+        elif isinstance(v, dict):
+            for vv in v.values():
+                if isinstance(vv, (int, float)):
+                    total += vv
+                elif isinstance(vv, (tuple, list)):
+                    total += sum(x for x in vv if isinstance(x, (int, float)))
+    return total
 
 
 _net_history = History()          # (ts, rx_mbps, tx_mbps)
@@ -449,6 +484,10 @@ def collect_gpu_detail() -> Dict:
 
 
 # ── Auth (multi-user: admin / regular) ─────────────────────────────────
+# NOTE: monitor-cli.py duplicates this file format + PBKDF2 hashing so it
+# can manage users without importing fastapi/psutil. Keep the two in sync
+# (search for "PBKDF2_ITER" in monitor-cli.py). The mtime cache in
+# _load_auth() picks up CLI edits automatically.
 PBKDF2_ITER = 390000
 _auth_lock = threading.Lock()  # guards auth.json read-modify-write
 ROLES = ("admin", "user")
@@ -2093,7 +2132,7 @@ def get_system_logs(lines: int = 50, unit: str = "", search: str = "",
     if unit:
         cmd += ["-u", unit]
     if level and level != "all":
-        cmd += [f"-p", level]
+        cmd += ["-p", level]
     if search:
         cmd += ["--grep", search]
     out = run_cmd(cmd, timeout=3)
@@ -2242,15 +2281,48 @@ COMPRESS_EXCLUDE_PATHS = {"/sw.js"}
 
 
 def _negotiate_encoding(accept_encoding: str, path: str) -> Optional[str]:
-    """Return the best encoding for this request, or None for identity."""
+    """Return the best encoding for this request, or None for identity.
+
+    Honors q-values: 'gzip;q=1.0, zstd;q=0.8' selects gzip, and entries
+    with q=0 are excluded entirely ('gzip, zstd;q=0' selects gzip).
+    """
     if path in COMPRESS_EXCLUDE_PATHS:
         return None
-    ae = (accept_encoding or "").lower()
-    if "zstd" in ae and "zstd" in COMPRESS_ENCODINGS and ZSTD_AVAILABLE:
-        return "zstd"
-    if "gzip" in ae and "gzip" in COMPRESS_ENCODINGS:
-        return "gzip"
-    return None
+    weights: Dict[str, float] = {}
+    for part in (accept_encoding or "").lower().split(","):
+        name, _, rest = part.strip().partition(";")
+        name = name.strip()
+        if not name:
+            continue
+        q = 1.0
+        for param in rest.split(";"):
+            key, eq, val = param.partition("=")
+            if eq and key.strip() == "q":
+                try:
+                    q = float(val.strip())
+                except ValueError:
+                    q = 0.0
+        weights[name] = q
+    # When quality values tie, the SERVER's preference wins (zstd is smaller
+    # and cheaper than gzip). Browsers list "gzip" first out of historical
+    # habit, not preference; RFC 7231 leaves tie-breaking to the server.
+    server_pref = {"zstd": 2, "gzip": 1}
+    best, best_key = None, None
+    for name, q in weights.items():
+        if q <= 0 or name == "identity":
+            continue
+        enc = None
+        if name == "zstd" and "zstd" in COMPRESS_ENCODINGS and ZSTD_AVAILABLE:
+            enc = "zstd"
+        elif (name == "gzip" or name == "*") and "gzip" in COMPRESS_ENCODINGS:
+            enc = "gzip"
+        if enc is None:
+            continue
+        # Maximize (client q-value, server preference).
+        key = (q, server_pref.get(enc, 0))
+        if best_key is None or key > best_key:
+            best, best_key = enc, key
+    return best
 
 
 class CompressionMiddleware:
@@ -2529,12 +2601,7 @@ def change_password(body: PasswordChange, request: Request):
 
 
 # ── Authenticated: metrics ──────────────────────────────────────────────
-@app.get("/", response_class=HTMLResponse)
-async def dashboard():
-    # Public shell: contains no sensitive data. The frontend JS checks
-    # /api/auth/status and shows the setup/login screen as needed; all
-    # real data lives behind require_auth.
-    return DASHBOARD_HTML
+# (The public "/" dashboard route is defined below with ETag support.)
 
 
 @app.get("/api/health")
@@ -2597,24 +2664,28 @@ async def api_network():
 
 
 @app.get("/api/net-history", dependencies=[Depends(require_auth)])
-async def api_net_history():
-    return _net_history.last()
+def api_net_history(minute: int = Query(default=0, ge=0, description="window in minutes (0 = all retained)"),
+                    points: int = Query(default=400, ge=50, le=2000)):
+    # Downsampled server-side: the browser canvas is <1000px wide, and the
+    # history now spans an hour — sending every 1.5s sample would be ~10x
+    # the payload for zero extra visible detail.
+    return _net_history.sampled(points, minute * 60)
 
 
 @app.get("/api/gpu-history", dependencies=[Depends(require_auth)])
-async def api_gpu_history():
+def api_gpu_history(minute: int = Query(default=0, ge=0), points: int = Query(default=400, ge=50, le=2000)):
     with _gpu_history_lock:
-        return {gid: h.last() for gid, h in _gpu_history.items()}
+        return {gid: h.sampled(points, minute * 60) for gid, h in _gpu_history.items()}
 
 
 @app.get("/api/cpu-freq-history", dependencies=[Depends(require_auth)])
-async def api_cpu_freq_history():
-    return _cpu_freq_history.last()
+def api_cpu_freq_history(minute: int = Query(default=0, ge=0), points: int = Query(default=400, ge=50, le=2000)):
+    return _cpu_freq_history.sampled(points, minute * 60)
 
 
 @app.get("/api/disk-io-history", dependencies=[Depends(require_auth)])
-async def api_disk_io_history():
-    return _disk_io_history.last()
+def api_disk_io_history(minute: int = Query(default=0, ge=0), points: int = Query(default=400, ge=50, le=2000)):
+    return _disk_io_history.sampled(points, minute * 60)
 
 
 @app.get("/api/temps", dependencies=[Depends(require_auth)])
@@ -2811,6 +2882,55 @@ def _load_dashboard() -> str:
 
 
 DASHBOARD_HTML = _load_dashboard()
+# Weak ETag over the served HTML: the page polls 4 JSON APIs per second but
+# is itself reloaded rarely; a 304 here skips re-parsing 90KB in the browser
+# and the SW cache write on every navigation/refresh.
+DASHBOARD_ETAG = 'W/"' + hashlib.sha256(DASHBOARD_HTML.encode()).hexdigest()[:32] + '"'
+
+
+@app.get("/")
+def dashboard(request: Request):
+    # Public shell: contains no sensitive data. The frontend JS checks
+    # /api/auth/status and shows the setup/login screen as needed; all
+    # real data lives behind require_auth.
+    # (Sync def on purpose: on a 304 the response is a tiny empty body, and
+    # running in the thread pool keeps the event loop free for API polls.
+    # No response_class= on the decorator: returning a Response instance
+    # directly keeps its custom headers — FastAPI re-wraps other returns.)
+    if request.headers.get("if-none-match") == DASHBOARD_ETAG:
+        return Response(status_code=304, headers={"ETag": DASHBOARD_ETAG})
+    return HTMLResponse(DASHBOARD_HTML, headers={"ETag": DASHBOARD_ETAG})
+
+
+# ── PWA icon (generated SVG, no binary assets in the repo) ──────────────
+_ICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">'
+    '<rect width="512" height="512" rx="96" fill="#0a0e14"/>'
+    '<polyline points="72,320 160,320 208,176 272,400 328,256 384,304 440,304" '
+    'fill="none" stroke="#4f9cff" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>'
+    '<circle cx="208" cy="176" r="26" fill="#4f9cff"/></svg>'
+)
+
+
+@app.get("/icon.svg", include_in_schema=False)
+def icon_svg():
+    return Response(_ICON_SVG, media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/manifest.webmanifest", include_in_schema=False)
+def manifest():
+    # Real manifest file instead of a data: URI: iOS ignores manifest icons
+    # loaded from data: URIs, and a URL-based manifest is more compatible.
+    body = json.dumps({
+        "name": "System Monitor", "short_name": "SysMon",
+        "start_url": ".", "display": "standalone",
+        "background_color": "#0a0e14", "theme_color": "#0a0e14",
+        "icons": [{"src": "icon.svg", "sizes": "any", "type": "image/svg+xml",
+                   "purpose": "any maskable"}],
+    })
+    return Response(body, media_type="application/manifest+json",
+                    headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/sw.js", include_in_schema=False)

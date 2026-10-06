@@ -171,7 +171,8 @@ Web login uses `Authorization: Bearer <session token>` (the browser carries it a
 | AI_MONITOR_DEBUG | 0 | 调试模式（开启 /api/all）/ debug mode |
 | AI_MONITOR_SAMPLE_INTERVAL | 1.5 | 采样间隔（秒）/ sample interval (s) |
 | AI_MONITOR_GPU_SAMPLE_INTERVAL | 2.0 | GPU 采样间隔（秒，越高越省 CPU）/ GPU sample interval (s) |
-| AI_MONITOR_HISTORY_WINDOW | 300 | 历史曲线保留时长（秒）/ history window (s) |
+| AI_MONITOR_HISTORY_WINDOW | 3600 | 历史曲线保留时长（秒）/ history window (s) |
+| AI_MONITOR_HISTORY_POINTS | 2400 | 历史曲线保留点数上限 / max retained history points |
 | AI_MONITOR_SMART_TTL | 60 | SMART 采集缓存（秒）/ SMART cache (s) |
 | AI_MONITOR_SESSION_TTL | 43200 | Web 会话有效期（秒）/ session TTL (s) |
 | AI_MONITOR_LOGIN_RATE_LIMIT | 5 | 登录限流：每窗口最大尝试次数（0=关闭）/ login attempts per window (0=off) |

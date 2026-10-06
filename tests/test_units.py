@@ -50,8 +50,10 @@ def test_login_limiter_allows_then_blocks(server_mod):
 def test_login_limiter_clear_resets(server_mod):
     lim = server_mod.LoginRateLimiter(limit=2, window_s=60)
     key = "1.2.3.4:bob"
-    lim.check(key); lim.record(key)
-    lim.check(key); lim.record(key)
+    lim.check(key)
+    lim.record(key)
+    lim.check(key)
+    lim.record(key)
     lim.clear(key)
     lim.check(key)  # no raise after clear
 
@@ -124,7 +126,6 @@ def test_webhook_payload_generic(server_mod):
 
 def test_webhook_deliver_bark_url(server_mod):
     # bark: url + device joined
-    import socket
     ch = {"type": "bark", "device": "dev9"}
     item = {"event": "t", "severity": "warning", "message": "m",
             "rule_id": "r", "when": "w"}

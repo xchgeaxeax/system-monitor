@@ -1,6 +1,5 @@
 """Metric endpoints, alert engine (trigger/resolve/ack/delete), and webhook
 config (secret preservation + masking)."""
-import pytest
 
 
 # ── Metric endpoints ────────────────────────────────────────────────────
