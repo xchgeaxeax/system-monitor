@@ -97,6 +97,12 @@ GZIP_LEVEL = int(os.getenv("AI_MONITOR_GZIP_LEVEL", "6"))
 # Graceful shutdown: set on SIGTERM/SIGINT so sampler threads can exit
 # cleanly instead of being killed mid-write.
 _shutdown = threading.Event()
+# Behind a reverse proxy (Caddy/nginx), request.client.host is always the
+# proxy (127.0.0.1), which would collapse every user into one login-rate-
+# limit bucket. Enable this to trust the proxy's X-Forwarded-For header.
+# Leave it off when the port is directly exposed: the header is client-
+# spoofable and would let an attacker reset their own rate limit.
+TRUST_PROXY = os.getenv("AI_MONITOR_TRUST_PROXY", "").lower() in ("1", "true")
 
 # ── Small helpers ───────────────────────────────────────────────────────
 def parse_float(s: Any, default: float = 0.0) -> float:
@@ -642,6 +648,22 @@ def _extract_token(request: Request) -> str:
     if h.lower().startswith("bearer "):
         return h[7:].strip()
     return request.query_params.get("token", "")
+
+
+def _client_ip(request: Request) -> str:
+    """Client IP for rate-limit keys.
+
+    With TRUST_PROXY, take the first hop of X-Forwarded-For (set by the
+    reverse proxy). Without it, use the socket peer. See TRUST_PROXY for
+    why trusting the header is opt-in.
+    """
+    if TRUST_PROXY:
+        xff = request.headers.get("x-forwarded-for", "")
+        if xff:
+            first = xff.split(",")[0].strip()
+            if first:
+                return first
+    return request.client.host if request.client else "?"
 
 
 def require_auth(request: Request) -> Dict:
@@ -1392,28 +1414,43 @@ def _get_cpu_snapshot() -> Dict:
     }
 
 
+# Top-memory process list cache. The memory tab polls /api/memory every 1.5s,
+# but a full process_iter() costs ~95ms on a 500-process box — pointless for
+# a top-30 list that changes slowly. Serve a cached scan within the TTL.
+_PROC_MEM_TTL_S = float(os.getenv("AI_MONITOR_PROC_MEM_TTL", "5"))
+_proc_mem_cache: Dict[str, Any] = {"time": 0.0, "data": []}
+
+
 def _get_memory_snapshot(proc_list: bool = True) -> Dict:
     mem = psutil.virtual_memory()
     swap = psutil.swap_memory()
     proc_mem = []
     if proc_list:
-        try:
-            for p in psutil.process_iter(["pid", "name", "memory_info", "memory_percent"]):
-                try:
-                    info = p.info
-                    rss = info["memory_info"].rss if info["memory_info"] else 0
-                    if rss > 5 * 1024 * 1024:
-                        proc_mem.append({
-                            "pid": info["pid"],
-                            "name": (info["name"] or "")[:40],
-                            "rss_mb": round(rss / 1024 / 1024, 1),
-                            "percent": round(info["memory_percent"] or 0, 1),
-                        })
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    continue
-        except Exception as e:
-            logger.warning(f"Memory process scan failed: {e}")
-        proc_mem.sort(key=lambda x: x["rss_mb"], reverse=True)
+        now = time.time()
+        cached = _proc_mem_cache
+        if now - cached["time"] < _PROC_MEM_TTL_S:
+            proc_mem = list(cached["data"])
+        else:
+            try:
+                for p in psutil.process_iter(["pid", "name", "memory_info", "memory_percent"]):
+                    try:
+                        info = p.info
+                        rss = info["memory_info"].rss if info["memory_info"] else 0
+                        if rss > 5 * 1024 * 1024:
+                            proc_mem.append({
+                                "pid": info["pid"],
+                                "name": (info["name"] or "")[:40],
+                                "rss_mb": round(rss / 1024 / 1024, 1),
+                                "percent": round(info["memory_percent"] or 0, 1),
+                            })
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+            except Exception as e:
+                logger.warning(f"Memory process scan failed: {e}")
+            proc_mem.sort(key=lambda x: x["rss_mb"], reverse=True)
+            proc_mem = proc_mem[:30]
+            _proc_mem_cache["time"] = now
+            _proc_mem_cache["data"] = proc_mem
 
     return {
         "total_gb": round(mem.total / 2**30, 2),
@@ -2291,8 +2328,7 @@ class UserRoleChange(BaseModel):
 
 @app.post("/api/auth/setup")
 def auth_setup(body: Credentials, request: Request):
-    ip = request.client.host if request.client else "?"
-    key = f"{ip}:setup"
+    key = f"{_client_ip(request)}:setup"
     setup_limiter.check(key)
     setup_limiter.record(key)
     username = body.username.strip()
@@ -2308,8 +2344,7 @@ def auth_setup(body: Credentials, request: Request):
 
 @app.post("/api/auth/login")
 def auth_login(body: Credentials, request: Request):
-    ip = request.client.host if request.client else "?"
-    key = f"{ip}:{body.username.strip().lower()}"
+    key = f"{_client_ip(request)}:{body.username.strip().lower()}"
     login_limiter.check(key)
     login_limiter.record(key)
     result = login(body.username, body.password)
@@ -2449,7 +2484,11 @@ async def dashboard():
 
 
 @app.get("/api/health")
-async def api_health():
+def api_health():
+    # Sync on purpose: get_health_detail() can spawn rocm-smi/intel_gpu_top
+    # subprocesses (1s timeout each) when the tool cache expires. FastAPI
+    # runs sync endpoints in a thread pool, so the event loop keeps serving
+    # the other concurrent polls.
     return get_health_detail()
 
 
@@ -2628,9 +2667,14 @@ async def webhooks_put(body: WebhookConfig):
     return _webhook_public(cfg)
 
 
-@app.post("/api/webhooks/test", dependencies=[Depends(require_auth)])
-async def webhooks_test():
-    """Send a test notification through all configured channels (sync, short)."""
+@app.post("/api/webhooks/test", dependencies=[Depends(require_admin)])
+def webhooks_test():
+    """Send a test notification through all configured channels (sync, short).
+
+    Sync endpoint on purpose: each channel does a blocking urlopen (5s
+    timeout). Running in the thread pool keeps the event loop free.
+    Admin-only so a regular user can't spam the owner's phone with tests.
+    """
     cfg = _load_webhook_cfg()
     results = []
     for ch in cfg.get("channels", []):

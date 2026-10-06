@@ -3,8 +3,11 @@
  * - GET /api/* responses are cached stale-while-revalidate so the panel
  *   still renders (with last-known data) when the network drops.
  * - Never caches 401/403, non-GET, or responses without a body.
+ * - Shell is network-first: a server-side dashboard update must be visible
+ *   on the next load, not hidden behind a stale cache until the cache
+ *   name changes. The cache is the offline fallback only.
  */
-const CACHE = 'sysmon-v1';
+const CACHE = 'sysmon-v2';
 const SHELL = ['/', '/sw.js'];
 
 self.addEventListener('install', (e) => {
@@ -44,17 +47,20 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // Shell: cache-first, then network (keeps offline launch fast).
+  // Shell: network-first, fall back to cache. Cache-first would pin users to
+  // an old dashboard.html after a server upgrade (the page is served from the
+  // server with no strong caching, so going to the network is cheap).
   e.respondWith(
-    caches.match(req).then((hit) => {
-      if (hit) return hit;
-      return fetch(req).then((res) => {
+    fetch(req)
+      .then((res) => {
         if (res.ok) {
           const clone = res.clone();
           caches.open(CACHE).then((c) => c.put(req, clone)).catch(() => {});
         }
         return res;
-      });
-    })
+      })
+      .catch(() =>
+        caches.match(req).then((hit) => hit || Response.error())
+      )
   );
 });

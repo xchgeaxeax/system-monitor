@@ -176,7 +176,9 @@ Web login uses `Authorization: Bearer <session token>` (the browser carries it a
 | AI_MONITOR_SESSION_TTL | 43200 | Web 会话有效期（秒）/ session TTL (s) |
 | AI_MONITOR_LOGIN_RATE_LIMIT | 5 | 登录限流：每窗口最大尝试次数（0=关闭）/ login attempts per window (0=off) |
 | AI_MONITOR_LOGIN_RATE_WINDOW | 60 | 登录限流窗口（秒）/ login rate window (s) |
+| AI_MONITOR_TRUST_PROXY | 0 | 反代后信任 X-Forwarded-For 做限流键（直连端口勿开）/ trust X-Forwarded-For behind a reverse proxy |
 | AI_MONITOR_MAX_SESSIONS | 500 | 最大并发 Web 会话数（超出淘汰最旧）/ max concurrent sessions |
+| AI_MONITOR_PROC_MEM_TTL | 5 | 内存 top 进程列表缓存（秒）/ top-memory process list cache (s) |
 | AI_MONITOR_COMPRESS | zstd,gzip | 响应压缩偏好（逗号列表，靠前者优先；`none`=关闭）/ compression preference |
 | AI_MONITOR_COMPRESS_MIN_SIZE | 500 | 压缩阈值（字节，小于不压）/ min size to compress (bytes) |
 | AI_MONITOR_ZSTD_LEVEL | 6 | zstd 压缩级别（1-22，越高越小越慢）/ zstd level |
